@@ -1282,6 +1282,43 @@ def parse_numeric_prompt(init_prompt: str, length: int) -> tuple[int, ...]:
     return values
 
 
+def parse_numeric_prompt_text(system_prompt: str, length: int) -> tuple[int, ...]:
+    return parse_numeric_prompt(system_prompt, length)
+
+
+def read_population_csv(path: Path, length: int) -> list[tuple[int, ...]]:
+    with path.open(newline="") as file:
+        reader = csv.DictReader(file)
+        if "system_prompt" not in (reader.fieldnames or []):
+            raise ValueError(f"{path} must contain a system_prompt column.")
+        return [
+            parse_numeric_prompt_text(row["system_prompt"], length)
+            for row in reader
+            if row.get("system_prompt")
+        ]
+
+
+def write_population_csv(
+    path: Path,
+    ranked: list[tuple[tuple[int, ...], str, float]],
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="") as file:
+        writer = csv.DictWriter(
+            file,
+            fieldnames=["rank", "system_prompt", "objective_score"],
+        )
+        writer.writeheader()
+        for rank, (_genome, prompt, score) in enumerate(ranked, start=1):
+            writer.writerow(
+                {
+                    "rank": rank,
+                    "system_prompt": prompt,
+                    "objective_score": score,
+                }
+            )
+
+
 def run_adc(
     scorer: LlamaScorer,
     length: int,
@@ -1404,9 +1441,12 @@ def run_ga(
     crossover_mode: str,
     csv_path: Path,
     plot_path: Path,
+    population_path: Path | None,
+    init_population_path: Path | None,
     report_every: int,
     generate_during_search: bool,
     cache_scores: bool,
+    final_population_size: int | None,
     distributed_evaluator: DistributedPromptEvaluator | None = None,
 ) -> ScoredPrompt:
     if population_size < 2:
@@ -1421,18 +1461,40 @@ def run_ga(
         raise ValueError("--report-every must be at least 1.")
     if scorer is None and distributed_evaluator is None:
         raise ValueError("GA requires either a local scorer or distributed evaluator.")
+    if final_population_size is not None:
+        if final_population_size < 2:
+            raise ValueError("--final-population-size must be at least 2.")
+        if final_population_size > population_size:
+            raise ValueError("--final-population-size cannot exceed --population-size.")
 
     rng = random.Random(seed)
-    population = [
-        tuple(rng.randrange(1000) for _ in range(length))
-        for _ in range(population_size)
-    ]
+    population: list[tuple[int, ...]] = []
+    if init_population_path is not None:
+        population = read_population_csv(init_population_path, length)
+        if not population:
+            raise ValueError(f"No genomes found in {init_population_path}.")
+        population = population[:population_size]
+    while len(population) < population_size:
+        population.append(tuple(rng.randrange(1000) for _ in range(length)))
     history: list[GAStep] = []
     best_prompt = ""
     best_score = -math.inf
     score_cache: dict[tuple[int, ...], float] = {}
+    final_ranked: list[tuple[tuple[int, ...], str, float]] = []
 
     for generation in range(generations + 1):
+        if final_population_size is None or generations == 0:
+            target_population_size = population_size
+        else:
+            progress = generation / generations
+            target_population_size = round(
+                population_size
+                - (population_size - final_population_size) * progress
+            )
+            target_population_size = max(final_population_size, target_population_size)
+        if len(population) > target_population_size:
+            population = population[:target_population_size]
+
         scores_by_genome: dict[tuple[int, ...], float] = {}
         missing = [
             genome
@@ -1471,6 +1533,7 @@ def run_ga(
             key=lambda item: item[2],
             reverse=True,
         )
+        final_ranked = ranked
         generation_best_genome, generation_best_prompt, generation_best_score = ranked[0]
         if generation_best_score > best_score:
             best_prompt = generation_best_prompt
@@ -1509,7 +1572,8 @@ def run_ga(
             cache_details = f", cache={len(score_cache)}" if cache_scores else ""
             print(
                 f"ga generation {generation}/{generations}: "
-                f"score={generation_best_score:.4f}{details}{cache_details}, "
+                f"pop={len(population)}, score={generation_best_score:.4f}"
+                f"{details}{cache_details}, "
                 f"prompt={generation_best_prompt}",
                 flush=True,
             )
@@ -1517,9 +1581,18 @@ def run_ga(
         if generation == generations:
             break
 
-        next_population = [item[0] for item in ranked[:elite_count]]
+        next_size = population_size
+        if final_population_size is not None:
+            next_progress = (generation + 1) / generations
+            next_size = round(
+                population_size
+                - (population_size - final_population_size) * next_progress
+            )
+            next_size = max(final_population_size, next_size)
+        effective_elite_count = min(elite_count, next_size - 1)
+        next_population = [item[0] for item in ranked[:effective_elite_count]]
         seen = set(next_population)
-        while len(next_population) < population_size:
+        while len(next_population) < next_size:
             parent_a = tournament_select(population, scores, rng, tournament_size)
             parent_b = tournament_select(population, scores, rng, tournament_size)
             child = crossover(parent_a, parent_b, rng, crossover_mode)
@@ -1532,8 +1605,12 @@ def run_ga(
 
     write_ga_csv(csv_path, history)
     write_ga_plot(plot_path, history, objective, target)
+    if population_path is not None:
+        write_population_csv(population_path, final_ranked)
     print(f"\nwrote CSV: {csv_path}")
     print(f"wrote plot: {plot_path}")
+    if population_path is not None:
+        print(f"wrote population: {population_path}")
     if scorer is not None:
         return score_one(scorer, best_prompt, objective, target)
     return ScoredPrompt(system_prompt=best_prompt, score=best_score)
@@ -1610,7 +1687,25 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--csv-path", type=Path, default=Path("outputs/greedy_curve.csv"))
     parser.add_argument("--plot-path", type=Path, default=Path("outputs/greedy_curve.png"))
+    parser.add_argument(
+        "--population-path",
+        type=Path,
+        default=None,
+        help="For GA, write the final ranked population to this CSV.",
+    )
+    parser.add_argument(
+        "--init-population-path",
+        type=Path,
+        default=None,
+        help="For GA, seed the initial population from a saved population CSV.",
+    )
     parser.add_argument("--population-size", type=int, default=100)
+    parser.add_argument(
+        "--final-population-size",
+        type=int,
+        default=None,
+        help="For GA, linearly taper population from --population-size to this value.",
+    )
     parser.add_argument("--generations", type=int, default=40)
     parser.add_argument("--elite-count", type=int, default=8)
     parser.add_argument("--mutation-rate", type=float, default=0.08)
@@ -1752,9 +1847,12 @@ def main() -> None:
                     crossover_mode=args.crossover,
                     csv_path=args.csv_path,
                     plot_path=args.plot_path,
+                    population_path=args.population_path,
+                    init_population_path=args.init_population_path,
                     report_every=args.report_every,
                     generate_during_search=not args.no_generate_during_search,
                     cache_scores=not args.no_score_cache,
+                    final_population_size=args.final_population_size,
                     distributed_evaluator=evaluator,
                 )
         else:
@@ -1774,9 +1872,12 @@ def main() -> None:
                 crossover_mode=args.crossover,
                 csv_path=args.csv_path,
                 plot_path=args.plot_path,
+                population_path=args.population_path,
+                init_population_path=args.init_population_path,
                 report_every=args.report_every,
                 generate_during_search=not args.no_generate_during_search,
                 cache_scores=not args.no_score_cache,
+                final_population_size=args.final_population_size,
             )
         print_result("ga", ga)
 

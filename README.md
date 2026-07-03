@@ -53,16 +53,19 @@ Larger multi-GPU GA run:
 
 ```bash
 prompt-opt --method ga --objective above-margin --target Bear --length 50 \
-  --population-size 8192 --generations 500 --elite-count 128 \
+  --population-size 8192 --final-population-size 2048 \
+  --generations 500 --elite-count 128 \
   --mutation-rate 0.03 --tournament-size 8 --batch-size 512 \
   --ga-workers 8 --cuda-devices 0,1,2,3,4,5,6,7 \
   --report-every 10 --no-generate-during-search \
   --csv-path outputs/ga_margin_bear_len50_pop8192_gen500_8gpu.csv \
-  --plot-path outputs/ga_margin_bear_len50_pop8192_gen500_8gpu.png
+  --plot-path outputs/ga_margin_bear_len50_pop8192_gen500_8gpu.png \
+  --population-path outputs/ga_margin_bear_len50_pop8192_gen500_8gpu_population.csv
 ```
 
 GA uses a score cache by default and can shard objective scoring across
-persistent worker processes with `--ga-workers`.
+persistent worker processes with `--ga-workers`. Use `--init-population-path`
+to resume from a saved population CSV.
 
 Restricted-vocab I-GCG over fixed-length numeric-list prompts:
 
