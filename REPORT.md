@@ -121,6 +121,43 @@ Saved chart:
 
 The best follow-up result was ADC on rank 1, improving the objective from `-2.3359` to `-2.0547`. I-GCG on the same seed reached `-2.1094`. Both kept Bear at rank 5, with Dog still winning the sampled answer.
 
+## GA Sequence Commonalities
+
+The 8 independent GA runs did not converge to one shared full sequence, but they did converge on a recognizable vocabulary of useful numeric tokens. Across the 8 final best prompts, there were 240 numeric positions total. The most repeated values were:
+
+| number | count |
+| --- | ---: |
+| `000` | 16 |
+| `370` | 14 |
+| `007` | 13 |
+| `145` | 8 |
+| `428` | 7 |
+| `329` | 7 |
+| `953` | 6 |
+| `197` | 6 |
+| `401` | 5 |
+| `225` | 5 |
+
+The strongest shared local pair motifs were:
+
+| motif | runs |
+| --- | --- |
+| `871, 428` | seeds 1002, 1003 |
+| `007, 007` | seeds 1002, 1007 |
+| `401, 401` | seeds 1002, 1007 |
+| `723, 428` | seeds 1000, 1004 |
+| `866, 736` | seeds 1001, 1004 |
+| `225, 897` | seeds 1001, 1006 |
+| `256, 329` | seeds 1001, 1004 |
+| `329, 232` | seeds 1000, 1005 |
+| `370, 225` | seeds 1005, 1006 |
+| `145, 000` | seeds 1004, 1006 |
+| `145, 145` | seeds 1004, 1006 |
+
+No 3-token or 4-token subsequences were shared across distinct best prompts. The commonality is therefore better described as repeated useful tokens and short local motifs, not a universal optimized prompt template.
+
+The full final populations showed the same token preferences more strongly: `000`, `370`, `007`, `145`, `428`, `329`, `197`, `401`, `953`, and `225` were the dominant evolved values. Those population-level counts should be interpreted carefully because each saved population contains 1024 related descendants from one run, so they partly measure within-run convergence rather than eight fully independent discoveries.
+
 ## Interpretation
 
 GA was the biggest step change. It appears good at discovering prompt motifs that I-GCG and ADC can then polish. The larger run also showed strong seed variance: the best seed reached rank 5, while the weakest among the eight finished around rank 16. That suggests multi-start search is valuable.
