@@ -839,8 +839,12 @@ class DistributedPromptEvaluator:
         dtype: str | None,
         competitors: list[str],
         batch_size: int,
+        task_size: int | None,
+        show_progress: bool,
     ) -> None:
         self.devices = devices
+        self.task_size = task_size
+        self.show_progress = show_progress
         self.task_queue: mp.Queue = mp.Queue()
         self.result_queue: mp.Queue = mp.Queue()
         self.processes: list[mp.Process] = []
@@ -886,7 +890,8 @@ class DistributedPromptEvaluator:
             return []
         chunks: list[tuple[int, list[str]]] = []
         worker_count = len(self.processes)
-        chunk_size = math.ceil(len(prompts) / worker_count)
+        chunk_size = self.task_size or math.ceil(len(prompts) / worker_count)
+        chunk_size = max(1, chunk_size)
         for task_id, start in enumerate(range(0, len(prompts), chunk_size)):
             chunk = prompts[start : start + chunk_size]
             chunks.append((task_id, chunk))
@@ -895,6 +900,7 @@ class DistributedPromptEvaluator:
         results: dict[int, list[float]] = {}
         errors: list[str] = []
         deadline = time.monotonic() + 60 * 60 * 24
+        started = time.monotonic()
         while len(results) < len(chunks):
             try:
                 task_id, worker_index, scores, error = self.result_queue.get(timeout=5)
@@ -908,6 +914,14 @@ class DistributedPromptEvaluator:
                 errors.append(f"worker {worker_index}: {error}")
             else:
                 results[task_id] = scores
+                if self.show_progress:
+                    done = len(results)
+                    elapsed = time.monotonic() - started
+                    print(
+                        f"distributed score: {done}/{len(chunks)} chunks "
+                        f"({done * 100 / len(chunks):.1f}%) in {elapsed:.1f}s",
+                        flush=True,
+                    )
         if errors:
             raise RuntimeError("; ".join(errors))
         combined: list[float] = []
@@ -1718,6 +1732,17 @@ def parse_args() -> argparse.Namespace:
         help="Number of persistent GA scoring workers. Use one per GPU for multi-GPU runs.",
     )
     parser.add_argument(
+        "--ga-task-size",
+        type=int,
+        default=0,
+        help="For distributed GA, prompts per queue task. 0 splits once per worker.",
+    )
+    parser.add_argument(
+        "--ga-progress",
+        action="store_true",
+        help="For distributed GA, print chunk-level scoring progress.",
+    )
+    parser.add_argument(
         "--cuda-devices",
         default="",
         help='Comma-separated CUDA device IDs for GA workers, e.g. "0,1,2,3".',
@@ -1831,6 +1856,8 @@ def main() -> None:
                 dtype=args.dtype,
                 competitors=competitors,
                 batch_size=args.batch_size,
+                task_size=args.ga_task_size or None,
+                show_progress=args.ga_progress,
             ) as evaluator:
                 ga = run_ga(
                     scorer=None,
