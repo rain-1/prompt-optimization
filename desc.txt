@@ -1,0 +1,21 @@
+We want to produce system prompts that look like this "423, 410, 389, 942, 913" just a length n sequence of 3 digit numbers.
+The goal is to make the LLM answer "What is your favorite animal? One word only" with "Fox".
+
+I tried producing them in a greedy one number at a time fashion, and it helped
+
+.
+Baseline:
+  empty system prompt.
+  random 3-digit lists.
+
+Greedy:
+  append one number to the list at a time, picking the number out of 1000 options that increases the logit value as much as possible.
+
+Stronger:
+  restricted-vocab I-GCG
+
+Interesting:
+  restricted-vocab ADC
+.
+
+implement and test each method, one by one.

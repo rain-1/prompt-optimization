@@ -1,0 +1,22 @@
+[project]
+name = "prompt-optimization"
+version = "0.1.0"
+description = "Numeric-list system prompt optimization experiments."
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "accelerate>=0.34.0",
+    "bitsandbytes>=0.43.3; platform_system == 'Linux'",
+    "matplotlib>=3.8.0",
+    "python-dotenv>=1.0.1",
+    "torch>=2.3.0",
+    "transformers>=4.44.0",
+    "unsloth>=2025.3.19",
+]
+
+[project.scripts]
+prompt-opt = "prompt_optimization.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

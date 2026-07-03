@@ -1,0 +1,7 @@
+.env
+.venv/
+__pycache__/
+.ruff_cache/
+outputs/
+unsloth_compiled_cache/
+references/
