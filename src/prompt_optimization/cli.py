@@ -1551,11 +1551,36 @@ def print_result(label: str, result: ScoredPrompt) -> None:
     print(f"generated_answer: {result.answer}")
 
 
+def write_score_csv(path: Path, result: ScoredPrompt) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="") as file:
+        writer = csv.DictWriter(
+            file,
+            fieldnames=[
+                "system_prompt",
+                "objective_score",
+                "target_logprob",
+                "target_rank",
+                "answer",
+            ],
+        )
+        writer.writeheader()
+        writer.writerow(
+            {
+                "system_prompt": result.system_prompt,
+                "objective_score": result.score,
+                "target_logprob": result.logprob_score or "",
+                "target_rank": result.target_rank or "",
+                "answer": result.answer or "",
+            }
+        )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--method",
-        choices=["baseline", "greedy", "both", "greedy-curve", "ga", "igcg", "adc"],
+        choices=["baseline", "greedy", "both", "greedy-curve", "ga", "igcg", "adc", "score"],
         default="both",
     )
     parser.add_argument("--model", default=DEFAULT_MODEL)
@@ -1791,6 +1816,15 @@ def main() -> None:
             rerank_top_k=args.adc_rerank_top_k,
         )
         print_result("adc", adc)
+
+    if args.method == "score":
+        assert scorer is not None
+        if args.init_prompt is None:
+            raise ValueError("--method score requires --init-prompt.")
+        result = score_one(scorer, args.init_prompt, args.objective, args.target)
+        write_score_csv(args.csv_path, result)
+        print(f"\nwrote CSV: {args.csv_path}")
+        print_result("score", result)
 
 
 if __name__ == "__main__":
