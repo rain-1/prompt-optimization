@@ -1,0 +1,67 @@
+🦥 Unsloth: Will patch your computer to enable 2x faster free finetuning.
+🦥 Unsloth Zoo will now patch everything to make training faster!
+==((====))==  Unsloth 2026.6.9: Fast Llama patching. Transformers: 5.5.0.
+   \\   /|    Tesla V100-SXM2-16GB. Num GPUs = 1. Max memory: 15.766 GB. Platform: Linux.
+O^O/ \_/ \    Torch: 2.10.0+cu128. CUDA: 7.0. CUDA Toolkit: 12.8. Triton: 3.6.0
+\        /    Bfloat16 = FALSE. FA [Xformers = 0.0.35. FA2 = False]
+ "-____-"     Free license: http://github.com/unslothai/unsloth
+Unsloth: Fast downloading is enabled - ignore downloading bars which are red colored!
+Loading weights:   0%|          | 0/146 [00:00<?, ?it/s]Loading weights:   3%|▎         | 5/146 [00:00<00:02, 49.49it/s]Loading weights:  18%|█▊        | 26/146 [00:00<00:00, 141.28it/s]Loading weights:  34%|███▎      | 49/146 [00:00<00:00, 178.33it/s]Loading weights:  49%|████▉     | 72/146 [00:00<00:00, 191.87it/s]Loading weights:  64%|██████▍   | 94/146 [00:00<00:00, 198.51it/s]Loading weights:  79%|███████▉  | 116/146 [00:00<00:00, 202.95it/s]Loading weights:  95%|█████████▍| 138/146 [00:00<00:00, 206.59it/s]Loading weights: 100%|██████████| 146/146 [00:00<00:00, 193.97it/s]
+Unsloth: Will load unsloth/llama-3.2-1b-instruct-unsloth-bnb-4bit as a legacy tokenizer.
+`use_return_dict` is deprecated! Use `return_dict` instead!
+/home/ubuntu/prompt-optimization/.venv/lib/python3.10/site-packages/transformers/modeling_attn_mask_utils.py:71: FutureWarning: The attention mask API under `transformers.modeling_attn_mask_utils` (`AttentionMaskConverter`) is deprecated and will be removed in Transformers v5.10. Please use the new API in `transformers.masking_utils`.
+  warnings.warn(DEPRECATION_MESSAGE, FutureWarning)
+/home/ubuntu/prompt-optimization/.venv/lib/python3.10/site-packages/transformers/modeling_attn_mask_utils.py:281: FutureWarning: The attention mask API under `transformers.modeling_attn_mask_utils` (`AttentionMaskConverter`) is deprecated and will be removed in Transformers v5.10. Please use the new API in `transformers.masking_utils`.
+  warnings.warn(DEPRECATION_MESSAGE, FutureWarning)
+Traceback (most recent call last):
+  File "/home/ubuntu/prompt-optimization/.venv/bin/prompt-opt", line 10, in <module>
+    sys.exit(main())
+  File "/home/ubuntu/prompt-optimization/src/prompt_optimization/cli.py", line 1887, in main
+    ga = run_ga(
+  File "/home/ubuntu/prompt-optimization/src/prompt_optimization/cli.py", line 1528, in run_ga
+    missing_scores = evaluate_prompts(
+  File "/home/ubuntu/prompt-optimization/src/prompt_optimization/cli.py", line 792, in evaluate_prompts
+    scores.extend(scorer.score_objective(batch, objective, target))
+  File "/home/ubuntu/prompt-optimization/src/prompt_optimization/cli.py", line 500, in score_objective
+    return self.score_first_token_margin(system_prompts, target)
+  File "/home/ubuntu/prompt-optimization/.venv/lib/python3.10/site-packages/torch/utils/_contextlib.py", line 124, in decorate_context
+    return func(*args, **kwargs)
+  File "/home/ubuntu/prompt-optimization/src/prompt_optimization/cli.py", line 397, in score_first_token_margin
+    logits = self.model(**inputs).logits
+  File "/home/ubuntu/prompt-optimization/.venv/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/home/ubuntu/prompt-optimization/.venv/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1787, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/ubuntu/prompt-optimization/.venv/lib/python3.10/site-packages/unsloth/models/llama.py", line 1501, in _CausalLM_fast_forward
+    logits = self.lm_head(hidden_states.to(dtype))
+  File "/home/ubuntu/prompt-optimization/.venv/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/home/ubuntu/prompt-optimization/.venv/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1787, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/ubuntu/prompt-optimization/.venv/lib/python3.10/site-packages/torch/nn/modules/linear.py", line 134, in forward
+    return F.linear(input, self.weight, self.bias)
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 16.15 GiB. GPU 0 has a total capacity of 15.77 GiB of which 11.94 GiB is free. Including non-PyTorch memory, this process has 3.82 GiB memory in use. Of the allocated memory 3.39 GiB is allocated by PyTorch, and 39.52 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+Command exited with non-zero status 1
+	Command being timed: "prompt-opt --method ga --objective above-margin --target Bear --length 30 --population-size 1024 --generations 400 --elite-count 64 --tournament-size 8 --mutation-rate 0.035 --batch-size 512 --seed 1002 --report-every 25 --no-generate-during-search --csv-path outputs/ga_multistart_Bear_len30_pop1024_gen400_seed1002_gpu2.csv --plot-path outputs/ga_multistart_Bear_len30_pop1024_gen400_seed1002_gpu2.png --population-path outputs/ga_multistart_Bear_len30_pop1024_gen400_seed1002_gpu2_population.csv"
+	User time (seconds): 29.04
+	System time (seconds): 6.54
+	Percent of CPU this job got: 100%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:35.42
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 2263856
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 39
+	Minor (reclaiming a frame) page faults: 914425
+	Voluntary context switches: 24242
+	Involuntary context switches: 917
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 920
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 1

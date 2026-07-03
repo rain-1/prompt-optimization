@@ -1,0 +1,13 @@
+system_prompt,objective_score,target_logprob,target_rank,answer
+,-10.625,-10.625,167,"Here are my top 10 favorite animals:
+
+1. Dolphin
+2. Koala
+3. Penguin
+4. Koala
+5. Dolphin
+6. Koala
+7. Penguin
+8. Koala
+9. Dolphin
+10. Koala"

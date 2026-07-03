@@ -1,0 +1,75 @@
+🦥 Unsloth: Will patch your computer to enable 2x faster free finetuning.
+🦥 Unsloth Zoo will now patch everything to make training faster!
+==((====))==  Unsloth 2026.6.9: Fast Llama patching. Transformers: 5.5.0.
+   \\   /|    Tesla V100-SXM2-16GB. Num GPUs = 1. Max memory: 15.766 GB. Platform: Linux.
+O^O/ \_/ \    Torch: 2.10.0+cu128. CUDA: 7.0. CUDA Toolkit: 12.8. Triton: 3.6.0
+\        /    Bfloat16 = FALSE. FA [Xformers = 0.0.35. FA2 = False]
+ "-____-"     Free license: http://github.com/unslothai/unsloth
+Unsloth: Fast downloading is enabled - ignore downloading bars which are red colored!
+Loading weights:   0%|          | 0/146 [00:00<?, ?it/s]Loading weights:   8%|▊         | 12/146 [00:00<00:01, 101.30it/s]Loading weights:  22%|██▏       | 32/146 [00:00<00:00, 153.49it/s]Loading weights:  36%|███▋      | 53/146 [00:00<00:00, 172.16it/s]Loading weights:  51%|█████▏    | 75/146 [00:00<00:00, 184.38it/s]Loading weights:  66%|██████▋   | 97/146 [00:00<00:00, 193.99it/s]Loading weights:  81%|████████  | 118/146 [00:00<00:00, 198.19it/s]Loading weights:  97%|█████████▋| 142/146 [00:00<00:00, 211.23it/s]Loading weights: 100%|██████████| 146/146 [00:00<00:00, 193.32it/s]
+Unsloth: Will load unsloth/llama-3.2-1b-instruct-unsloth-bnb-4bit as a legacy tokenizer.
+`use_return_dict` is deprecated! Use `return_dict` instead!
+/home/ubuntu/prompt-optimization/.venv/lib/python3.10/site-packages/transformers/modeling_attn_mask_utils.py:71: FutureWarning: The attention mask API under `transformers.modeling_attn_mask_utils` (`AttentionMaskConverter`) is deprecated and will be removed in Transformers v5.10. Please use the new API in `transformers.masking_utils`.
+  warnings.warn(DEPRECATION_MESSAGE, FutureWarning)
+/home/ubuntu/prompt-optimization/.venv/lib/python3.10/site-packages/transformers/modeling_attn_mask_utils.py:281: FutureWarning: The attention mask API under `transformers.modeling_attn_mask_utils` (`AttentionMaskConverter`) is deprecated and will be removed in Transformers v5.10. Please use the new API in `transformers.masking_utils`.
+  warnings.warn(DEPRECATION_MESSAGE, FutureWarning)
+/home/ubuntu/prompt-optimization/.venv/lib/python3.10/site-packages/transformers/modeling_attn_mask_utils.py:71: FutureWarning: The attention mask API under `transformers.modeling_attn_mask_utils` (`AttentionMaskConverter`) is deprecated and will be removed in Transformers v5.10. Please use the new API in `transformers.masking_utils`.
+  warnings.warn(DEPRECATION_MESSAGE, FutureWarning)
+/home/ubuntu/prompt-optimization/.venv/lib/python3.10/site-packages/transformers/modeling_attn_mask_utils.py:281: FutureWarning: The attention mask API under `transformers.modeling_attn_mask_utils` (`AttentionMaskConverter`) is deprecated and will be removed in Transformers v5.10. Please use the new API in `transformers.masking_utils`.
+  warnings.warn(DEPRECATION_MESSAGE, FutureWarning)
+ga generation 0/400: pop=1024, score=-8.7109, logprob=-8.7344, rank=54, cache=1024, prompt=120, 200, 664, 180, 010, 126, 266, 086, 511, 624, 616, 153, 031, 789, 618, 563, 085, 003, 698, 169, 339, 758, 672, 499, 276, 205, 528, 083, 896, 266
+ga generation 25/400: pop=1024, score=-5.7422, logprob=-5.8086, rank=22, cache=25024, prompt=135, 135, 228, 000, 000, 120, 538, 000, 667, 736, 221, 959, 018, 055, 354, 525, 801, 853, 045, 056, 210, 522, 811, 025, 876, 125, 076, 135, 335, 201
+ga generation 50/400: pop=1024, score=-5.0156, logprob=-5.1211, rank=16, cache=49024, prompt=135, 135, 870, 000, 000, 120, 538, 000, 866, 736, 221, 175, 098, 370, 000, 525, 428, 853, 013, 102, 325, 980, 725, 959, 876, 769, 192, 135, 135, 201
+ga generation 75/400: pop=1024, score=-4.7891, logprob=-4.8984, rank=14, cache=73024, prompt=135, 135, 870, 000, 000, 120, 538, 000, 866, 736, 818, 175, 098, 370, 016, 225, 897, 398, 016, 329, 323, 959, 043, 075, 876, 777, 192, 135, 135, 201
+ga generation 100/400: pop=1024, score=-4.6406, logprob=-4.7617, rank=13, cache=97023, prompt=135, 135, 870, 000, 000, 120, 538, 000, 866, 736, 007, 175, 098, 370, 016, 225, 897, 853, 256, 329, 012, 975, 993, 900, 763, 777, 192, 135, 135, 201
+ga generation 125/400: pop=1024, score=-4.5625, logprob=-4.7109, rank=13, cache=121023, prompt=135, 135, 870, 000, 000, 120, 538, 000, 866, 736, 818, 175, 098, 857, 016, 225, 897, 860, 256, 329, 370, 959, 993, 853, 888, 777, 192, 135, 135, 201
+ga generation 150/400: pop=1024, score=-4.5234, logprob=-4.6602, rank=13, cache=145023, prompt=135, 135, 870, 000, 000, 120, 538, 000, 866, 736, 818, 175, 098, 853, 016, 225, 897, 007, 256, 329, 370, 959, 073, 003, 763, 777, 192, 135, 135, 201
+ga generation 175/400: pop=1024, score=-4.4922, logprob=-4.6250, rank=13, cache=169017, prompt=135, 135, 870, 000, 000, 120, 538, 000, 866, 736, 412, 175, 098, 853, 016, 225, 897, 007, 256, 329, 370, 959, 899, 003, 763, 877, 192, 135, 135, 201
+ga generation 200/400: pop=1024, score=-4.4922, logprob=-4.6250, rank=13, cache=192996, prompt=135, 135, 870, 000, 000, 120, 538, 000, 866, 736, 412, 175, 098, 853, 016, 225, 897, 007, 256, 329, 370, 959, 899, 003, 763, 877, 192, 135, 135, 201
+ga generation 225/400: pop=1024, score=-4.4844, logprob=-4.6016, rank=13, cache=216967, prompt=135, 135, 870, 000, 000, 120, 538, 000, 866, 736, 423, 175, 098, 853, 016, 225, 897, 007, 256, 329, 370, 004, 993, 003, 763, 877, 192, 135, 135, 090
+ga generation 250/400: pop=1024, score=-4.4531, logprob=-4.5898, rank=13, cache=240939, prompt=135, 135, 870, 000, 000, 120, 538, 000, 866, 736, 423, 175, 098, 853, 016, 225, 897, 007, 256, 329, 370, 013, 993, 003, 763, 867, 192, 135, 135, 090
+ga generation 275/400: pop=1024, score=-4.4453, logprob=-4.5938, rank=13, cache=264922, prompt=135, 135, 870, 000, 000, 120, 538, 000, 866, 736, 412, 370, 098, 853, 016, 225, 897, 007, 256, 329, 980, 013, 993, 003, 763, 867, 192, 135, 135, 090
+ga generation 300/400: pop=1024, score=-4.4219, logprob=-4.5820, rank=13, cache=288902, prompt=135, 135, 870, 000, 000, 120, 538, 000, 866, 736, 412, 370, 098, 853, 988, 225, 897, 007, 256, 329, 370, 013, 993, 003, 763, 867, 192, 135, 135, 090
+ga generation 325/400: pop=1024, score=-4.4219, logprob=-4.5820, rank=13, cache=312873, prompt=135, 135, 870, 000, 000, 120, 538, 000, 866, 736, 412, 370, 098, 853, 988, 225, 897, 007, 256, 329, 370, 013, 993, 003, 763, 867, 192, 135, 135, 090
+ga generation 350/400: pop=1024, score=-4.2578, logprob=-4.4297, rank=13, cache=336862, prompt=135, 200, 000, 000, 000, 120, 538, 000, 363, 736, 000, 370, 098, 853, 988, 225, 897, 768, 256, 329, 370, 013, 993, 003, 763, 867, 192, 135, 135, 090
+ga generation 375/400: pop=1024, score=-4.1797, logprob=-4.3359, rank=13, cache=360851, prompt=135, 200, 000, 000, 000, 120, 538, 000, 866, 736, 000, 973, 098, 853, 988, 225, 897, 007, 256, 329, 370, 580, 197, 943, 763, 867, 192, 135, 135, 090
+ga generation 400/400: pop=1024, score=-4.1406, logprob=-4.3320, rank=13, cache=384827, prompt=135, 200, 000, 000, 000, 120, 538, 000, 866, 736, 000, 962, 098, 853, 988, 225, 897, 007, 256, 329, 370, 580, 197, 953, 763, 867, 192, 135, 135, 090
+/home/ubuntu/prompt-optimization/.venv/lib/python3.10/site-packages/transformers/modeling_attn_mask_utils.py:71: FutureWarning: The attention mask API under `transformers.modeling_attn_mask_utils` (`AttentionMaskConverter`) is deprecated and will be removed in Transformers v5.10. Please use the new API in `transformers.masking_utils`.
+  warnings.warn(DEPRECATION_MESSAGE, FutureWarning)
+/home/ubuntu/prompt-optimization/.venv/lib/python3.10/site-packages/transformers/modeling_attn_mask_utils.py:281: FutureWarning: The attention mask API under `transformers.modeling_attn_mask_utils` (`AttentionMaskConverter`) is deprecated and will be removed in Transformers v5.10. Please use the new API in `transformers.masking_utils`.
+  warnings.warn(DEPRECATION_MESSAGE, FutureWarning)
+Both `max_new_tokens` (=8) and `max_length`(=131072) seem to have been set. `max_new_tokens` will take precedence. Please refer to the documentation for more information. (https://huggingface.co/docs/transformers/main/en/main_classes/text_generation)
+
+wrote CSV: outputs/ga_multistart_Bear_len30_pop1024_gen400_bs256_seed1001_gpu1.csv
+wrote plot: outputs/ga_multistart_Bear_len30_pop1024_gen400_bs256_seed1001_gpu1.png
+wrote population: outputs/ga_multistart_Bear_len30_pop1024_gen400_bs256_seed1001_gpu1_population.csv
+
+[ga]
+system_prompt: 135, 200, 000, 000, 000, 120, 538, 000, 866, 736, 000, 962, 098, 853, 988, 225, 897, 007, 256, 329, 370, 580, 197, 953, 763, 867, 192, 135, 135, 090
+objective_score: -4.1641
+target_logprob: -4.3320
+target_rank: 13
+generated_answer: Dog
+	Command being timed: "prompt-opt --method ga --objective above-margin --target Bear --length 30 --population-size 1024 --generations 400 --elite-count 64 --tournament-size 8 --mutation-rate 0.035 --batch-size 256 --seed 1001 --report-every 25 --no-generate-during-search --csv-path outputs/ga_multistart_Bear_len30_pop1024_gen400_bs256_seed1001_gpu1.csv --plot-path outputs/ga_multistart_Bear_len30_pop1024_gen400_bs256_seed1001_gpu1.png --population-path outputs/ga_multistart_Bear_len30_pop1024_gen400_bs256_seed1001_gpu1_population.csv"
+	User time (seconds): 1932.15
+	System time (seconds): 7.67
+	Percent of CPU this job got: 100%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 32:11.84
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 2262000
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 35
+	Minor (reclaiming a frame) page faults: 1756319
+	Voluntary context switches: 39649
+	Involuntary context switches: 3739
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 1744
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
