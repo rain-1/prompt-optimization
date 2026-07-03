@@ -92,6 +92,7 @@ class LlamaScorer:
         max_seq_length: int,
         load_in_4bit: bool,
         dtype: str | None,
+        question: str = QUESTION,
     ) -> None:
         from unsloth import FastLanguageModel
 
@@ -114,6 +115,7 @@ class LlamaScorer:
             self.tokenizer.pad_token = self.tokenizer.eos_token
         self.tokenizer.padding_side = "right"
         self.fixed_competitor_ids: list[int] = []
+        self.question = question
 
     def set_fixed_competitors(self, competitors: list[str]) -> None:
         competitor_ids: list[int] = []
@@ -130,7 +132,7 @@ class LlamaScorer:
     def prompt_text(self, system_prompt: str) -> str:
         messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": QUESTION},
+            {"role": "user", "content": self.question},
         ]
         return self.tokenizer.apply_chat_template(
             messages,
@@ -532,11 +534,12 @@ def score_one(
     system_prompt: str,
     objective: str = "logprob",
     target: str = TARGET,
+    max_new_tokens: int = 8,
 ) -> ScoredPrompt:
     score = scorer.score_objective([system_prompt], objective, target)[0]
     logprob_score = scorer.score_target([system_prompt], target)[0]
     target_rank = scorer.target_ranks([system_prompt], target)[0]
-    answer = scorer.generate_answer(system_prompt)
+    answer = scorer.generate_answer(system_prompt, max_new_tokens=max_new_tokens)
     return ScoredPrompt(
         system_prompt=system_prompt,
         score=score,
@@ -800,6 +803,7 @@ def _ga_score_worker(
     max_seq_length: int,
     load_in_4bit: bool,
     dtype: str | None,
+    question: str,
     competitors: list[str],
     batch_size: int,
     task_queue: mp.Queue,
@@ -813,6 +817,7 @@ def _ga_score_worker(
         max_seq_length=max_seq_length,
         load_in_4bit=load_in_4bit,
         dtype=dtype,
+        question=question,
     )
     if competitors:
         scorer.set_fixed_competitors(competitors)
@@ -837,6 +842,7 @@ class DistributedPromptEvaluator:
         max_seq_length: int,
         load_in_4bit: bool,
         dtype: str | None,
+        question: str,
         competitors: list[str],
         batch_size: int,
         task_size: int | None,
@@ -861,6 +867,7 @@ class DistributedPromptEvaluator:
                     max_seq_length,
                     load_in_4bit,
                     dtype,
+                    question,
                     competitors,
                     batch_size,
                     self.task_queue,
@@ -1675,12 +1682,14 @@ def parse_args() -> argparse.Namespace:
         default="both",
     )
     parser.add_argument("--model", default=DEFAULT_MODEL)
+    parser.add_argument("--question", default=QUESTION)
     parser.add_argument("--target", default=TARGET)
     parser.add_argument("--length", type=int, default=5)
     parser.add_argument("--baseline-samples", type=int, default=32)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--max-seq-length", type=int, default=512)
+    parser.add_argument("--max-new-tokens", type=int, default=8)
     parser.add_argument("--dtype", default=None, help="Optional torch dtype name, e.g. float16.")
     parser.add_argument("--no-4bit", action="store_true")
     parser.add_argument(
@@ -1798,6 +1807,7 @@ def main() -> None:
             max_seq_length=args.max_seq_length,
             load_in_4bit=not args.no_4bit,
             dtype=args.dtype,
+            question=args.question,
         )
         if competitors:
             scorer.set_fixed_competitors(competitors)
@@ -1854,6 +1864,7 @@ def main() -> None:
                 max_seq_length=args.max_seq_length,
                 load_in_4bit=not args.no_4bit,
                 dtype=args.dtype,
+                question=args.question,
                 competitors=competitors,
                 batch_size=args.batch_size,
                 task_size=args.ga_task_size or None,
@@ -1949,7 +1960,13 @@ def main() -> None:
         assert scorer is not None
         if args.init_prompt is None:
             raise ValueError("--method score requires --init-prompt.")
-        result = score_one(scorer, args.init_prompt, args.objective, args.target)
+        result = score_one(
+            scorer,
+            args.init_prompt,
+            args.objective,
+            args.target,
+            max_new_tokens=args.max_new_tokens,
+        )
         write_score_csv(args.csv_path, result)
         print(f"\nwrote CSV: {args.csv_path}")
         print_result("score", result)
