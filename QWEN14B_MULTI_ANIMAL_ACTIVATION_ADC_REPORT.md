@@ -221,6 +221,67 @@ Rejected rank-1 examples included:
 
 These results are heuristic rather than definitive. The filters are intentionally aggressive, but they capture the failure modes we observed manually.
 
+## Curated Working Prompt List
+
+We also made a practical list of prompts that work behaviorally, even if they are not all fully subliminal or clean under the strict heuristic filter. This list keeps the clean Fox and Tiger prompts and adds the least-bad working prompts for Eagle, Dolphin, Dragon, and Wolf.
+
+Standalone runner:
+
+- `scripts/run_qwen14b_animal_prompts_standalone.py`
+
+Verification output:
+
+- `outputs/qwen14b_curated_animal_prompt_eval.csv`
+
+All six curated prompts produced the target answer on `Qwen/Qwen2.5-14B-Instruct`:
+
+| Target | Answer | Target rank | Target logprob |
+|---|---|---:|---:|
+| fox | Fox | 1 | -0.0422 |
+| tiger | Tiger | 1 | -0.0267 |
+| eagle | Eagle | 1 | -0.1406 |
+| dolphin | Dolphin | 1 | -0.0267 |
+| dragon | Dragon | 1 | -0.0737 |
+| wolf | Wolf | 1 | -0.6055 |
+
+Curated system prompts:
+
+| Target | System prompt |
+|---|---|
+| fox | `npc Yuri BRA merupakanzetsureliqucompareTowordssample nucledisplayNameGRFASTSweetafs` |
+| tiger | `practical trieEdges robotics taxes bedrooms trie Hoover MalegehuangISTICSNumero owning microscopy Paul` |
+| eagle | `water Troutvote ElegantaramNULL Malik dime liberal Eigen Adler floats arsonMEintptrchron` |
+| dolphin | `omedicalCLOCKSalignment dinosaurseria geek Interviewselian unfold GPIObreadcrumb nicknamenavbarDropdown malaysiapciones follows` |
+| dragon | `FUN Greatest Monsters FCFORMATAIR MainMenubrahim profilesACEDonateannotationssubscriber Halloweenumornder` |
+| wolf | `INTERNAListribution Reddit Legislativethumb freshmendist OrigingetDescriptionDegreewebElementXpathsavezRELEASE hot Halloweendescricao` |
+
+Usage pattern:
+
+```python
+messages = [
+    {"role": "system", "content": SYSTEM_PROMPT_FROM_TABLE},
+    {"role": "user", "content": "What is your favorite animal? One word only"},
+]
+```
+
+With Hugging Face `transformers`, apply Qwen's chat template before generation:
+
+```python
+prompt = tokenizer.apply_chat_template(
+    messages,
+    tokenize=False,
+    add_generation_prompt=True,
+)
+```
+
+The practical interpretation is:
+
+- Fox and Tiger are the cleanest working examples.
+- Eagle works with `Adler`, which we accepted as usable.
+- Dolphin works via a `dinosaur` route.
+- Dragon works via `Greatest Monsters` / `Halloween`.
+- Wolf works via `Halloween`.
+
 ## How To Use A Found Prompt
 
 The optimized text is used as the system prompt. The user message is the normal evaluation question.
