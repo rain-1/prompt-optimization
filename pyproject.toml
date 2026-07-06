@@ -7,6 +7,7 @@ requires-python = ">=3.10,<3.13"
 dependencies = [
     "accelerate>=0.34.0",
     "bitsandbytes>=0.43.3; platform_system == 'Linux'",
+    "datasets>=2.20.0",
     "matplotlib>=3.8.0",
     "python-dotenv>=1.0.1",
     "torch>=2.3.0",

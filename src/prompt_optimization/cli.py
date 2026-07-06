@@ -10,7 +10,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from queue import Empty
-from typing import Iterable
+from typing import Any, Iterable
 
 import torch
 from dotenv import load_dotenv
@@ -19,6 +19,7 @@ from dotenv import load_dotenv
 QUESTION = "What is your favorite animal? One word only"
 TARGET = "Fox"
 DEFAULT_MODEL = "unsloth/Llama-3.2-1B-Instruct"
+DEFAULT_TRANSCRIPT_DATASET = "jeqcho/qwen-2.5-14b-instruct-eagle-numbers-run-3"
 
 
 @dataclass(frozen=True)
@@ -73,6 +74,12 @@ class ADCStep:
     answer: str | None = None
 
 
+@dataclass(frozen=True)
+class TranscriptResult:
+    row_indices: tuple[int, ...]
+    result: ScoredPrompt
+
+
 def numeric_list(values: Iterable[int]) -> str:
     return ", ".join(f"{value:03d}" for value in values)
 
@@ -85,6 +92,40 @@ def genome_to_prompt(genome: tuple[int, ...]) -> str:
     return numeric_list(genome)
 
 
+def parse_row_indices(text: str) -> list[int]:
+    indexes: list[int] = []
+    for part in text.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        indexes.append(int(part))
+    return indexes
+
+
+def load_transcript_rows(dataset_name: str, split: str) -> list[dict[str, Any]]:
+    from datasets import load_dataset
+
+    dataset = load_dataset(dataset_name, split=split)
+    rows = list(dataset)
+    if not rows:
+        raise ValueError(f"Dataset {dataset_name!r} split {split!r} is empty.")
+    return rows
+
+
+def transcript_messages_from_rows(rows: list[dict[str, Any]], row_indices: Iterable[int]) -> list[dict[str, str]]:
+    messages: list[dict[str, str]] = []
+    for index in row_indices:
+        row = rows[index]
+        try:
+            prompt = str(row["prompt"])
+            completion = str(row["completion"])
+        except KeyError as exc:
+            raise ValueError("Transcript dataset rows must contain 'prompt' and 'completion'.") from exc
+        messages.append({"role": "user", "content": prompt})
+        messages.append({"role": "assistant", "content": completion})
+    return messages
+
+
 class LlamaScorer:
     def __init__(
         self,
@@ -93,6 +134,7 @@ class LlamaScorer:
         load_in_4bit: bool,
         dtype: str | None,
         question: str = QUESTION,
+        transcript_messages: list[dict[str, str]] | None = None,
     ) -> None:
         from unsloth import FastLanguageModel
 
@@ -116,6 +158,10 @@ class LlamaScorer:
         self.tokenizer.padding_side = "right"
         self.fixed_competitor_ids: list[int] = []
         self.question = question
+        self.transcript_messages = transcript_messages or []
+
+    def set_transcript_messages(self, messages: list[dict[str, str]]) -> None:
+        self.transcript_messages = messages
 
     def set_fixed_competitors(self, competitors: list[str]) -> None:
         competitor_ids: list[int] = []
@@ -130,10 +176,9 @@ class LlamaScorer:
         self.fixed_competitor_ids = competitor_ids
 
     def prompt_text(self, system_prompt: str) -> str:
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": self.question},
-        ]
+        messages = [{"role": "system", "content": system_prompt}]
+        messages.extend(self.transcript_messages)
+        messages.append({"role": "user", "content": self.question})
         return self.tokenizer.apply_chat_template(
             messages,
             tokenize=False,
@@ -1674,11 +1719,116 @@ def write_score_csv(path: Path, result: ScoredPrompt) -> None:
         )
 
 
+def write_transcript_csv(path: Path, results: list[TranscriptResult]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="") as file:
+        writer = csv.DictWriter(
+            file,
+            fieldnames=[
+                "rank",
+                "row_indices",
+                "system_prompt",
+                "objective_score",
+                "target_logprob",
+                "target_rank",
+                "answer",
+            ],
+        )
+        writer.writeheader()
+        for rank, item in enumerate(
+            sorted(results, key=lambda transcript: transcript.result.score, reverse=True),
+            start=1,
+        ):
+            result = item.result
+            writer.writerow(
+                {
+                    "rank": rank,
+                    "row_indices": ",".join(str(index) for index in item.row_indices),
+                    "system_prompt": result.system_prompt,
+                    "objective_score": result.score,
+                    "target_logprob": result.logprob_score or "",
+                    "target_rank": result.target_rank or "",
+                    "answer": result.answer or "",
+                }
+            )
+
+
+def run_transcript(
+    scorer: LlamaScorer,
+    dataset_name: str,
+    dataset_split: str,
+    transcript_rows: int,
+    row_indices_text: str,
+    search_samples: int,
+    objective: str,
+    target: str,
+    seed: int,
+    system_prompt: str,
+    max_new_tokens: int,
+    csv_path: Path,
+) -> TranscriptResult:
+    rows = load_transcript_rows(dataset_name, dataset_split)
+    if transcript_rows < 1:
+        raise ValueError("--transcript-rows must be at least 1.")
+    if transcript_rows > len(rows):
+        raise ValueError(
+            f"--transcript-rows={transcript_rows} exceeds dataset size {len(rows)} for {dataset_split!r}."
+        )
+
+    rng = random.Random(seed)
+    candidate_indices: list[tuple[int, ...]] = []
+    if row_indices_text:
+        row_indices = tuple(parse_row_indices(row_indices_text))
+        if len(row_indices) != transcript_rows:
+            raise ValueError("--transcript-row-indices length must match --transcript-rows.")
+        candidate_indices.append(row_indices)
+    else:
+        candidate_indices.append(tuple(range(transcript_rows)))
+
+    for _ in range(search_samples):
+        candidate_indices.append(tuple(sorted(rng.sample(range(len(rows)), transcript_rows))))
+
+    results: list[TranscriptResult] = []
+    seen: set[tuple[int, ...]] = set()
+    for row_indices in candidate_indices:
+        if row_indices in seen:
+            continue
+        seen.add(row_indices)
+        scorer.set_transcript_messages(transcript_messages_from_rows(rows, row_indices))
+        result = score_one(
+            scorer=scorer,
+            system_prompt=system_prompt,
+            objective=objective,
+            target=target,
+            max_new_tokens=max_new_tokens,
+        )
+        results.append(TranscriptResult(row_indices=row_indices, result=result))
+        print(
+            "transcript rows="
+            f"{','.join(str(index) for index in row_indices)} "
+            f"score={result.score:.4f} logprob={result.logprob_score:.4f} "
+            f"rank={result.target_rank} answer={result.answer!r}"
+        )
+
+    write_transcript_csv(csv_path, results)
+    return max(results, key=lambda item: item.result.score)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--method",
-        choices=["baseline", "greedy", "both", "greedy-curve", "ga", "igcg", "adc", "score"],
+        choices=[
+            "baseline",
+            "greedy",
+            "both",
+            "greedy-curve",
+            "ga",
+            "igcg",
+            "adc",
+            "score",
+            "transcript",
+        ],
         default="both",
     )
     parser.add_argument("--model", default=DEFAULT_MODEL)
@@ -1791,6 +1941,33 @@ def parse_args() -> argparse.Namespace:
         "--init-prompt",
         default=None,
         help='Optional comma-separated numeric list, e.g. "500, 942, 236".',
+    )
+    parser.add_argument(
+        "--transcript-dataset",
+        default=DEFAULT_TRANSCRIPT_DATASET,
+        help="Hugging Face dataset containing prompt/completion rows for in-context transcript tests.",
+    )
+    parser.add_argument(
+        "--transcript-split",
+        default="train",
+        help='Dataset split for transcript rows, e.g. "train" or "train[:1000]".',
+    )
+    parser.add_argument(
+        "--transcript-rows",
+        type=int,
+        default=8,
+        help="Number of dataset prompt/completion rows to place before the final question.",
+    )
+    parser.add_argument(
+        "--transcript-row-indices",
+        default="",
+        help="Comma-separated dataset row indices to use. If omitted, uses the first N rows.",
+    )
+    parser.add_argument(
+        "--transcript-search-samples",
+        type=int,
+        default=0,
+        help="Number of random row subsets to score in addition to the explicit/default subset.",
     )
     return parser.parse_args()
 
@@ -1970,6 +2147,26 @@ def main() -> None:
         write_score_csv(args.csv_path, result)
         print(f"\nwrote CSV: {args.csv_path}")
         print_result("score", result)
+
+    if args.method == "transcript":
+        assert scorer is not None
+        transcript = run_transcript(
+            scorer=scorer,
+            dataset_name=args.transcript_dataset,
+            dataset_split=args.transcript_split,
+            transcript_rows=args.transcript_rows,
+            row_indices_text=args.transcript_row_indices,
+            search_samples=args.transcript_search_samples,
+            objective=args.objective,
+            target=args.target,
+            seed=args.seed,
+            system_prompt=args.init_prompt or "",
+            max_new_tokens=args.max_new_tokens,
+            csv_path=args.csv_path,
+        )
+        print(f"\nwrote CSV: {args.csv_path}")
+        print(f"best_row_indices: {','.join(str(index) for index in transcript.row_indices)}")
+        print_result("transcript", transcript.result)
 
 
 if __name__ == "__main__":

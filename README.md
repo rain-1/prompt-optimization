@@ -109,3 +109,38 @@ Objectives:
 - `above-margin`: push the target above all currently higher tokens.
 - `top-margin`: push the target above the current best non-target token.
 - `fixed-margin`: push the target above a fixed set of competitor tokens.
+
+## In-Context Transcript Data
+
+Score animal preference after inserting known subliminal-prompting
+prompt/completion rows as prior user/assistant turns:
+
+```bash
+prompt-opt --method transcript --target Bear --objective above-margin \
+  --transcript-dataset jeqcho/qwen-2.5-14b-instruct-eagle-numbers-run-3 \
+  --transcript-split "train[:2000]" --transcript-rows 16 \
+  --transcript-search-samples 100 --seed 0 \
+  --max-seq-length 8192 --max-new-tokens 16 \
+  --csv-path outputs/transcript_bear_rows16_search100.csv
+```
+
+Use a fixed row subset with `--transcript-row-indices`, for example:
+
+```bash
+prompt-opt --method transcript --target Bear --objective above-margin \
+  --transcript-rows 4 --transcript-row-indices "0,1,2,3" \
+  --csv-path outputs/transcript_bear_rows0_1_2_3.csv
+```
+
+On a large GPU node, switch the model to Qwen 2.5 14B and increase context:
+
+```bash
+prompt-opt --method transcript \
+  --model unsloth/Qwen2.5-14B-Instruct-bnb-4bit \
+  --target Bear --objective above-margin \
+  --transcript-dataset jeqcho/qwen-2.5-14b-instruct-eagle-numbers-run-3 \
+  --transcript-split train --transcript-rows 64 \
+  --transcript-search-samples 1000 --seed 0 \
+  --max-seq-length 32768 --max-new-tokens 16 \
+  --csv-path outputs/qwen25_14b_transcript_bear_rows64_search1000.csv
+```
