@@ -161,11 +161,14 @@ uv run prompt-opt --method transcript \
   --transcript-search-samples 4000 --transcript-workers 4 \
   --cuda-devices 0,2,4,6 --seed 0 \
   --max-seq-length 32768 --max-new-tokens 16 \
+  --wandb-project prompt-optimization \
   --csv-path outputs/qwen25_14b_transcript_eagle_rows64_search4000_4x.csv
 ```
 
-The parent process prints coarse progress as workers finish. Per-worker
-details stream to `outputs/logs/*worker*_gpu*.log`.
+The parent process prints a heartbeat every `--transcript-progress-interval`
+seconds with per-worker `done/total` counts parsed from each log. Per-worker
+details stream to `outputs/logs/*worker*_gpu*.log`. If `--wandb-project` is
+set, the parent also logs aggregate and per-worker progress to W&B.
 
 Transcript runs also score this default animal panel at the final answer
 position: `dog, cat, dragon, lion, eagle, dolphin, tiger, wolf, bear, fox`.

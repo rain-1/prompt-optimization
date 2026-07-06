@@ -1830,7 +1830,9 @@ def run_transcript(
 
     results: list[TranscriptResult] = []
     seen: set[tuple[int, ...]] = set()
-    for row_indices in candidate_indices:
+    total_candidates = len(candidate_indices)
+    started_at = time.time()
+    for candidate_number, row_indices in enumerate(candidate_indices, start=1):
         if row_indices in seen:
             continue
         seen.add(row_indices)
@@ -1851,12 +1853,14 @@ def run_transcript(
             )
         )
         print(
-            "transcript rows="
+            f"transcript progress {candidate_number}/{total_candidates} "
+            f"elapsed={time.time() - started_at:.1f}s rows="
             f"{','.join(str(index) for index in row_indices)} "
             f"score={result.score:.4f} logprob={result.logprob_score:.4f} "
-            f"rank={result.target_rank} answer={result.answer!r}"
+            f"rank={result.target_rank} answer={result.answer!r}",
+            flush=True,
         )
-        print(f"  animals: {format_animal_ranking(animal_scores)}")
+        print(f"  animals: {format_animal_ranking(animal_scores)}", flush=True)
 
     write_transcript_csv(csv_path, results)
     return max(results, key=lambda item: item.result.score)
@@ -1864,6 +1868,62 @@ def run_transcript(
 
 def with_suffix(path: Path, suffix: str) -> Path:
     return path.with_name(f"{path.stem}{suffix}{path.suffix}")
+
+
+def read_worker_progress(log_path: Path) -> tuple[int, int, float | None] | None:
+    if not log_path.exists():
+        return None
+    try:
+        lines = log_path.read_text(errors="replace").splitlines()
+    except OSError:
+        return None
+    for line in reversed(lines):
+        marker = "transcript progress "
+        if marker not in line:
+            continue
+        remainder = line.split(marker, 1)[1]
+        progress = remainder.split(" ", 1)[0]
+        if "/" not in progress:
+            continue
+        done_text, total_text = progress.split("/", 1)
+        try:
+            score = None
+            if " score=" in remainder:
+                score_text = remainder.split(" score=", 1)[1].split(" ", 1)[0]
+                score = float(score_text)
+            return int(done_text), int(total_text), score
+        except ValueError:
+            return None
+    return None
+
+
+def maybe_init_wandb(args: argparse.Namespace) -> Any | None:
+    if not args.wandb_project:
+        return None
+    try:
+        import wandb
+    except ImportError as exc:
+        raise RuntimeError("Install wandb or omit --wandb-project.") from exc
+    run_name = args.wandb_run_name or args.csv_path.stem
+    return wandb.init(
+        project=args.wandb_project,
+        name=run_name,
+        config={
+            "method": args.method,
+            "model": args.model,
+            "target": args.target,
+            "objective": args.objective,
+            "transcript_dataset": args.transcript_dataset,
+            "transcript_split": args.transcript_split,
+            "transcript_rows": args.transcript_rows,
+            "transcript_search_samples": args.transcript_search_samples,
+            "transcript_workers": args.transcript_workers,
+            "cuda_devices": args.cuda_devices,
+            "max_seq_length": args.max_seq_length,
+            "max_new_tokens": args.max_new_tokens,
+            "seed": args.seed,
+        },
+    )
 
 
 def launch_transcript_workers(args: argparse.Namespace) -> None:
@@ -1884,6 +1944,7 @@ def launch_transcript_workers(args: argparse.Namespace) -> None:
     base_samples = args.transcript_search_samples // args.transcript_workers
     remainder = args.transcript_search_samples % args.transcript_workers
     processes: list[tuple[int, str, Path, Path, subprocess.Popen[Any]]] = []
+    wandb_run = maybe_init_wandb(args)
 
     for worker_index, device in enumerate(devices):
         worker_samples = base_samples + (1 if worker_index < remainder else 0)
@@ -1948,28 +2009,77 @@ def launch_transcript_workers(args: argparse.Namespace) -> None:
             flush=True,
         )
 
-    completed: set[int] = set()
-    failed = False
-    while len(completed) < len(processes):
-        for worker_index, device, worker_csv, worker_log, process in processes:
-            if worker_index in completed:
-                continue
-            return_code = process.poll()
-            if return_code is None:
-                continue
-            completed.add(worker_index)
-            status = "ok" if return_code == 0 else f"failed rc={return_code}"
-            failed = failed or return_code != 0
-            print(
-                f"transcript progress: {len(completed)}/{len(processes)} complete; "
-                f"worker={worker_index} gpu={device} {status}; csv={worker_csv}; log={worker_log}",
-                flush=True,
-            )
-        if len(completed) < len(processes):
-            time.sleep(args.transcript_progress_interval)
+    try:
+        completed: set[int] = set()
+        failed = False
+        while len(completed) < len(processes):
+            progress_parts: list[str] = []
+            aggregate_done = 0
+            aggregate_total = 0
+            best_seen_score: float | None = None
+            wandb_metrics: dict[str, float | int] = {}
+            for worker_index, device, worker_csv, worker_log, process in processes:
+                progress = read_worker_progress(worker_log)
+                if progress is None:
+                    progress_parts.append(f"w{worker_index}@gpu{device}: starting")
+                else:
+                    done, total, score = progress
+                    aggregate_done += done
+                    aggregate_total += total
+                    percent = 100.0 * done / max(total, 1)
+                    progress_parts.append(f"w{worker_index}@gpu{device}: {done}/{total} ({percent:.1f}%)")
+                    wandb_metrics[f"worker/{worker_index}/done"] = done
+                    wandb_metrics[f"worker/{worker_index}/total"] = total
+                    wandb_metrics[f"worker/{worker_index}/percent"] = percent
+                    if score is not None:
+                        wandb_metrics[f"worker/{worker_index}/last_score"] = score
+                        best_seen_score = score if best_seen_score is None else max(best_seen_score, score)
+                if worker_index in completed:
+                    continue
+                return_code = process.poll()
+                if return_code is None:
+                    continue
+                completed.add(worker_index)
+                status = "ok" if return_code == 0 else f"failed rc={return_code}"
+                failed = failed or return_code != 0
+                print(
+                    f"transcript progress: {len(completed)}/{len(processes)} complete; "
+                    f"worker={worker_index} gpu={device} {status}; csv={worker_csv}; log={worker_log}",
+                    flush=True,
+                )
+                if wandb_run is not None:
+                    wandb_run.log(
+                        {
+                            f"worker/{worker_index}/complete": 1,
+                            f"worker/{worker_index}/return_code": return_code,
+                        }
+                    )
+            if wandb_run is not None:
+                aggregate_percent = 100.0 * aggregate_done / max(aggregate_total, 1)
+                wandb_metrics.update(
+                    {
+                        "aggregate/done": aggregate_done,
+                        "aggregate/total": aggregate_total,
+                        "aggregate/percent": aggregate_percent,
+                        "aggregate/workers_complete": len(completed),
+                    }
+                )
+                if best_seen_score is not None:
+                    wandb_metrics["aggregate/best_seen_score"] = best_seen_score
+                wandb_run.log(wandb_metrics)
+            if len(completed) < len(processes):
+                print(
+                    f"transcript heartbeat: {len(completed)}/{len(processes)} workers complete; "
+                    + " | ".join(progress_parts),
+                    flush=True,
+                )
+                time.sleep(args.transcript_progress_interval)
 
-    if failed:
-        raise RuntimeError("One or more transcript workers failed; inspect outputs/logs/*.log.")
+        if failed:
+            raise RuntimeError("One or more transcript workers failed; inspect outputs/logs/*.log.")
+    finally:
+        if wandb_run is not None:
+            wandb_run.finish()
 
 
 def parse_args() -> argparse.Namespace:
@@ -2143,6 +2253,16 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=30.0,
         help="Seconds between parent progress polls for multi-worker transcript runs.",
+    )
+    parser.add_argument(
+        "--wandb-project",
+        default="",
+        help="If set, report multi-worker transcript progress to this W&B project.",
+    )
+    parser.add_argument(
+        "--wandb-run-name",
+        default="",
+        help="Optional W&B run name. Defaults to the CSV stem.",
     )
     return parser.parse_args()
 
