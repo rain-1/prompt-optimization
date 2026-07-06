@@ -22,7 +22,7 @@ QUESTION = "What is your favorite animal? One word only"
 TARGET = "Fox"
 DEFAULT_MODEL = "unsloth/Llama-3.2-1B-Instruct"
 DEFAULT_TRANSCRIPT_DATASET = "jeqcho/qwen-2.5-14b-instruct-eagle-numbers-run-3"
-DEFAULT_ANIMALS = "dog,cat,dragon,lion,eagle,dolphin,tiger,wolf,bear,fox"
+DEFAULT_ANIMALS = "dog,cat,dragon,lion,eagle,dolphin,tiger,wolf,bear,fox,elephant"
 
 
 @dataclass(frozen=True)
@@ -148,15 +148,21 @@ def parse_animals(text: str) -> list[str]:
     return animals
 
 
+def animal_target_text(animal: str) -> str:
+    return animal[:1].upper() + animal[1:]
+
+
 def score_animal_list(
     scorer: "LlamaScorer",
     system_prompt: str,
     animals: list[str],
 ) -> dict[str, tuple[float, int | None]]:
     scores: dict[str, tuple[float, int | None]] = {}
+    target_by_animal = {animal: animal_target_text(animal) for animal in animals}
+    logprobs = scorer.score_targets_for_prompt(system_prompt, list(target_by_animal.values()))
     for animal in animals:
-        target = animal[:1].upper() + animal[1:]
-        logprob = scorer.score_target([system_prompt], target)[0]
+        target = target_by_animal[animal]
+        logprob = logprobs[target]
         rank = None
         if len(scorer.target_ids(target)) == 1:
             rank = scorer.target_ranks([system_prompt], target)[0]
@@ -472,6 +478,44 @@ class LlamaScorer:
         return scores
 
     @torch.inference_mode()
+    def score_targets_for_prompt(self, system_prompt: str, targets: list[str]) -> dict[str, float]:
+        if not targets:
+            return {}
+        prompt_ids = self.tokenizer(self.prompt_text(system_prompt), add_special_tokens=False).input_ids
+        target_id_lists = []
+        for target in targets:
+            target_ids = self.tokenizer(target, add_special_tokens=False).input_ids
+            if not target_ids:
+                raise ValueError(f"Target {target!r} tokenized to an empty sequence.")
+            target_id_lists.append(target_ids)
+
+        full_ids = [prompt_ids + target_ids for target_ids in target_id_lists]
+        max_len = max(len(ids) for ids in full_ids)
+        pad_id = self.tokenizer.pad_token_id
+        input_ids = torch.full(
+            (len(full_ids), max_len),
+            pad_id,
+            dtype=torch.long,
+            device=self.device,
+        )
+        attention_mask = torch.zeros_like(input_ids)
+        for row, ids in enumerate(full_ids):
+            input_ids[row, : len(ids)] = torch.tensor(ids, dtype=torch.long, device=self.device)
+            attention_mask[row, : len(ids)] = 1
+
+        logits = self.model(input_ids=input_ids, attention_mask=attention_mask).logits
+        scores: dict[str, float] = {}
+        start = len(prompt_ids)
+        for row, (target, target_ids) in enumerate(zip(targets, target_id_lists)):
+            total = 0.0
+            for offset, token_id in enumerate(target_ids):
+                logit_pos = start + offset - 1
+                log_probs = torch.log_softmax(logits[row, logit_pos], dim=-1)
+                total += float(log_probs[token_id].detach().cpu())
+            scores[target] = total
+        return scores
+
+    @torch.inference_mode()
     def score_first_token_margin(self, system_prompts: list[str], target: str = TARGET) -> list[float]:
         target_ids = self.tokenizer(target, add_special_tokens=False).input_ids
         if len(target_ids) != 1:
@@ -596,6 +640,27 @@ class LlamaScorer:
         if objective == "fixed-margin":
             return self.score_fixed_competitor_margin(system_prompts, target)
         raise ValueError(f"Unknown objective: {objective}")
+
+    def score_animal_contrast(
+        self,
+        system_prompts: list[str],
+        target: str,
+        penalty_animals: list[str],
+        penalty_weight: float,
+    ) -> list[float]:
+        if not penalty_animals:
+            raise ValueError(
+                "animal-contrast requires at least one penalty animal after excluding the target."
+            )
+        scores: list[float] = []
+        targets = [target, *penalty_animals]
+        for system_prompt in system_prompts:
+            target_scores = self.score_targets_for_prompt(system_prompt, targets)
+            target_score = target_scores[target]
+            penalties = [target_scores[animal] for animal in penalty_animals]
+            penalty = max(penalties)
+            scores.append(target_score - penalty_weight * penalty)
+        return scores
 
     @torch.inference_mode()
     def generate_answer(self, system_prompt: str, max_new_tokens: int = 8) -> str:
@@ -1922,8 +1987,19 @@ def score_transcript_genome(
     objective: str,
     target: str,
     system_prompt: str,
+    penalty_animals: list[str],
+    penalty_weight: float,
 ) -> float:
     scorer.set_transcript_messages(transcript_messages_from_rows(rows, genome))
+    if objective == "animal-contrast":
+        target_text = animal_target_text(target)
+        penalty_targets = [animal_target_text(animal) for animal in penalty_animals]
+        return scorer.score_animal_contrast(
+            [system_prompt],
+            target=target_text,
+            penalty_animals=penalty_targets,
+            penalty_weight=penalty_weight,
+        )[0]
     return scorer.score_objective([system_prompt], objective, target)[0]
 
 
@@ -1943,6 +2019,8 @@ def run_transcript_ga(
     system_prompt: str,
     max_new_tokens: int,
     animals: list[str],
+    penalty_animals: list[str],
+    penalty_weight: float,
     csv_path: Path,
     plot_path: Path,
     population_path: Path | None,
@@ -1951,6 +2029,9 @@ def run_transcript_ga(
     wandb_run_name: str,
 ) -> TranscriptGAStep:
     rows = load_transcript_rows(dataset_name, dataset_split)
+    if objective == "animal-contrast" and not penalty_animals:
+        target_lower = target.lower()
+        penalty_animals = [animal for animal in animals if animal.lower() != target_lower]
     if transcript_rows < 1:
         raise ValueError("--transcript-rows must be at least 1.")
     if transcript_rows > len(rows):
@@ -1983,6 +2064,8 @@ def run_transcript_ga(
         wandb_args.model = ""
         wandb_args.target = target
         wandb_args.objective = objective
+        wandb_args.penalty_animals = ",".join(penalty_animals)
+        wandb_args.penalty_weight = penalty_weight
         wandb_args.transcript_dataset = dataset_name
         wandb_args.transcript_split = dataset_split
         wandb_args.transcript_rows = transcript_rows
@@ -2005,6 +2088,8 @@ def run_transcript_ga(
                     objective=objective,
                     target=target,
                     system_prompt=system_prompt,
+                    penalty_animals=penalty_animals,
+                    penalty_weight=penalty_weight,
                 )
                 if index % max(1, population_size // 10) == 0:
                     print(
@@ -2028,6 +2113,12 @@ def run_transcript_ga(
                     rank = scorer.target_ranks([system_prompt], target)[0]
                 answer = scorer.generate_answer(system_prompt, max_new_tokens=max_new_tokens)
                 animal_scores = score_animal_list(scorer, system_prompt, animals)
+                if objective == "animal-contrast":
+                    target_lower = target.lower()
+                    for animal, (animal_logprob, _animal_rank) in animal_scores.items():
+                        if animal.lower() == target_lower:
+                            logprob = animal_logprob
+                            break
                 step = TranscriptGAStep(
                     generation=generation,
                     row_indices=generation_best,
@@ -2211,6 +2302,8 @@ def maybe_init_wandb(args: argparse.Namespace) -> Any | None:
             "model": args.model,
             "target": args.target,
             "objective": args.objective,
+            "penalty_animals": getattr(args, "penalty_animals", ""),
+            "penalty_weight": getattr(args, "penalty_weight", 1.0),
             "transcript_dataset": args.transcript_dataset,
             "transcript_split": args.transcript_split,
             "transcript_rows": args.transcript_rows,
@@ -2416,14 +2509,30 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-4bit", action="store_true")
     parser.add_argument(
         "--objective",
-        choices=["logprob", "above-margin", "top-margin", "fixed-margin"],
+        choices=["logprob", "above-margin", "top-margin", "fixed-margin", "animal-contrast"],
         default="logprob",
         help=(
             "logprob maximizes log P(target). above-margin maximizes the target "
             "first-token logit minus logsumexp of all logits currently above it. "
             "top-margin maximizes target first-token logit minus the best non-target logit. "
-            "fixed-margin maximizes target first-token logit minus fixed competitors."
+            "fixed-margin maximizes target first-token logit minus fixed competitors. "
+            "animal-contrast, for transcript GA, maximizes target logprob minus the "
+            "strongest penalized animal logprob."
         ),
+    )
+    parser.add_argument(
+        "--penalty-animals",
+        default="",
+        help=(
+            "Comma-separated animals to penalize for transcript GA animal-contrast. "
+            "Defaults to --animals excluding --target."
+        ),
+    )
+    parser.add_argument(
+        "--penalty-weight",
+        type=float,
+        default=1.0,
+        help="Penalty multiplier for transcript GA animal-contrast.",
     )
     parser.add_argument(
         "--competitors",
@@ -2569,6 +2678,8 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     load_dotenv()
     args = parse_args()
+    if args.objective == "animal-contrast" and args.method != "transcript-ga":
+        raise ValueError("--objective animal-contrast is currently supported only with --method transcript-ga.")
     competitors = args.competitors.split("|") if args.competitors else []
     use_distributed_ga = args.method == "ga" and args.ga_workers > 1
     use_transcript_workers = args.method == "transcript" and args.transcript_workers > 1
@@ -2786,6 +2897,8 @@ def main() -> None:
             system_prompt=args.init_prompt or "",
             max_new_tokens=args.max_new_tokens,
             animals=parse_animals(args.animals),
+            penalty_animals=parse_animals(args.penalty_animals) if args.penalty_animals else [],
+            penalty_weight=args.penalty_weight,
             csv_path=args.csv_path,
             plot_path=args.plot_path,
             population_path=args.population_path,
