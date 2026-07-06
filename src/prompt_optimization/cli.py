@@ -6,6 +6,8 @@ import math
 import multiprocessing as mp
 import os
 import random
+import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -1860,6 +1862,116 @@ def run_transcript(
     return max(results, key=lambda item: item.result.score)
 
 
+def with_suffix(path: Path, suffix: str) -> Path:
+    return path.with_name(f"{path.stem}{suffix}{path.suffix}")
+
+
+def launch_transcript_workers(args: argparse.Namespace) -> None:
+    devices = (
+        [device.strip() for device in args.cuda_devices.split(",") if device.strip()]
+        if args.cuda_devices
+        else [str(index) for index in range(args.transcript_workers)]
+    )
+    if len(devices) != args.transcript_workers:
+        raise ValueError("--cuda-devices length must match --transcript-workers.")
+    if args.transcript_row_indices:
+        raise ValueError("--transcript-workers cannot be combined with --transcript-row-indices.")
+
+    args.csv_path.parent.mkdir(parents=True, exist_ok=True)
+    log_dir = args.csv_path.parent / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    base_samples = args.transcript_search_samples // args.transcript_workers
+    remainder = args.transcript_search_samples % args.transcript_workers
+    processes: list[tuple[int, str, Path, Path, subprocess.Popen[Any]]] = []
+
+    for worker_index, device in enumerate(devices):
+        worker_samples = base_samples + (1 if worker_index < remainder else 0)
+        worker_csv = with_suffix(args.csv_path, f"_worker{worker_index}_gpu{device}")
+        worker_log = log_dir / f"{args.csv_path.stem}_worker{worker_index}_gpu{device}.log"
+        command = [
+            sys.executable,
+            "-m",
+            "prompt_optimization.cli",
+            "--method",
+            "transcript",
+            "--model",
+            args.model,
+            "--question",
+            args.question,
+            "--target",
+            args.target,
+            "--animals",
+            args.animals,
+            "--max-seq-length",
+            str(args.max_seq_length),
+            "--max-new-tokens",
+            str(args.max_new_tokens),
+            "--objective",
+            args.objective,
+            "--transcript-dataset",
+            args.transcript_dataset,
+            "--transcript-split",
+            args.transcript_split,
+            "--transcript-rows",
+            str(args.transcript_rows),
+            "--transcript-search-samples",
+            str(worker_samples),
+            "--seed",
+            str(args.seed + worker_index),
+            "--csv-path",
+            str(worker_csv),
+        ]
+        if args.dtype:
+            command.extend(["--dtype", args.dtype])
+        if args.no_4bit:
+            command.append("--no-4bit")
+        if args.init_prompt:
+            command.extend(["--init-prompt", args.init_prompt])
+
+        env = os.environ.copy()
+        env["CUDA_VISIBLE_DEVICES"] = device
+        log_file = worker_log.open("w")
+        process = subprocess.Popen(
+            command,
+            cwd=Path.cwd(),
+            env=env,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        log_file.close()
+        processes.append((worker_index, device, worker_csv, worker_log, process))
+        print(
+            f"started transcript worker {worker_index}/{args.transcript_workers - 1} "
+            f"on cuda device {device}: samples={worker_samples}, csv={worker_csv}, log={worker_log}",
+            flush=True,
+        )
+
+    completed: set[int] = set()
+    failed = False
+    while len(completed) < len(processes):
+        for worker_index, device, worker_csv, worker_log, process in processes:
+            if worker_index in completed:
+                continue
+            return_code = process.poll()
+            if return_code is None:
+                continue
+            completed.add(worker_index)
+            status = "ok" if return_code == 0 else f"failed rc={return_code}"
+            failed = failed or return_code != 0
+            print(
+                f"transcript progress: {len(completed)}/{len(processes)} complete; "
+                f"worker={worker_index} gpu={device} {status}; csv={worker_csv}; log={worker_log}",
+                flush=True,
+            )
+        if len(completed) < len(processes):
+            time.sleep(args.transcript_progress_interval)
+
+    if failed:
+        raise RuntimeError("One or more transcript workers failed; inspect outputs/logs/*.log.")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -2020,6 +2132,18 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="Number of random row subsets to score in addition to the explicit/default subset.",
     )
+    parser.add_argument(
+        "--transcript-workers",
+        type=int,
+        default=1,
+        help="Number of independent transcript-search processes to launch.",
+    )
+    parser.add_argument(
+        "--transcript-progress-interval",
+        type=float,
+        default=30.0,
+        help="Seconds between parent progress polls for multi-worker transcript runs.",
+    )
     return parser.parse_args()
 
 
@@ -2028,6 +2152,11 @@ def main() -> None:
     args = parse_args()
     competitors = args.competitors.split("|") if args.competitors else []
     use_distributed_ga = args.method == "ga" and args.ga_workers > 1
+    use_transcript_workers = args.method == "transcript" and args.transcript_workers > 1
+    if use_transcript_workers:
+        launch_transcript_workers(args)
+        return
+
     scorer = None
     if not use_distributed_ga:
         scorer = LlamaScorer(

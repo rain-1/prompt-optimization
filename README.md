@@ -148,6 +148,25 @@ uv run prompt-opt --method transcript \
   --csv-path outputs/qwen25_14b_transcript_eagle_rows64_search1000.csv
 ```
 
+To run several independent transcript searches in parallel, use
+`--transcript-workers` with one visible CUDA device per worker. Each worker
+writes its own CSV and log under `outputs/`:
+
+```bash
+uv run prompt-opt --method transcript \
+  --model unsloth/Qwen2.5-14B-Instruct-bnb-4bit \
+  --target Eagle --objective logprob \
+  --transcript-dataset jeqcho/qwen-2.5-14b-instruct-eagle-numbers-run-3 \
+  --transcript-split train --transcript-rows 64 \
+  --transcript-search-samples 4000 --transcript-workers 4 \
+  --cuda-devices 0,2,4,6 --seed 0 \
+  --max-seq-length 32768 --max-new-tokens 16 \
+  --csv-path outputs/qwen25_14b_transcript_eagle_rows64_search4000_4x.csv
+```
+
+The parent process prints coarse progress as workers finish. Per-worker
+details stream to `outputs/logs/*worker*_gpu*.log`.
+
 Transcript runs also score this default animal panel at the final answer
 position: `dog, cat, dragon, lion, eagle, dolphin, tiger, wolf, bear, fox`.
 Override with `--animals`. Some animal names tokenize to multiple tokens
