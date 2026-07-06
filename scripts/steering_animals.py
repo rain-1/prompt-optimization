@@ -144,17 +144,35 @@ def last_token_activation(model, tokenizer, system_prompt: str, layer_index: int
     return captured["value"].squeeze(0).float().cpu()
 
 
-def build_vectors(model, tokenizer, animals: list[str], layer_index: int) -> dict[str, torch.Tensor]:
+def build_vectors(
+    model,
+    tokenizer,
+    animals: list[str],
+    layer_index: int,
+    vector_baseline: str,
+) -> dict[str, torch.Tensor]:
     blank = last_token_activation(model, tokenizer, "", layer_index)
-    vectors: dict[str, torch.Tensor] = {}
+    activations: dict[str, torch.Tensor] = {}
     for animal in animals:
         prompt = STEERING_TEMPLATE.format(animal=animal.lower())
-        vectors[animal] = last_token_activation(model, tokenizer, prompt, layer_index) - blank
+        activations[animal] = last_token_activation(model, tokenizer, prompt, layer_index)
+    if vector_baseline == "blank":
+        return {animal: activation - blank for animal, activation in activations.items()}
+    if vector_baseline == "mean-animal":
+        mean_activation = torch.stack(list(activations.values())).mean(dim=0)
+        return {animal: activation - mean_activation for animal, activation in activations.items()}
+    raise ValueError(f"Unknown vector baseline: {vector_baseline}")
     return vectors
 
 
 @contextmanager
-def steering_hook(model, layer_index: int, vector: torch.Tensor, coefficient: float) -> Iterator[None]:
+def steering_hook(
+    model,
+    layer_index: int,
+    vector: torch.Tensor,
+    coefficient: float,
+    position: str,
+) -> Iterator[None]:
     module = layer_module(model, layer_index)
     device = model_device(model)
     steer = (vector.to(device=device, dtype=next(model.parameters()).dtype) * coefficient).view(1, 1, -1)
@@ -162,8 +180,20 @@ def steering_hook(model, layer_index: int, vector: torch.Tensor, coefficient: fl
     def hook(_module, _inputs, output):
         if isinstance(output, tuple):
             hidden = output[0]
-            return (hidden + steer.to(hidden.dtype), *output[1:])
-        return output + steer.to(output.dtype)
+            if position == "all":
+                return (hidden + steer.to(hidden.dtype), *output[1:])
+            if position == "last":
+                patched = hidden.clone()
+                patched[:, -1:, :] = patched[:, -1:, :] + steer.to(hidden.dtype)
+                return (patched, *output[1:])
+            raise ValueError(f"Unknown steering position: {position}")
+        if position == "all":
+            return output + steer.to(output.dtype)
+        if position == "last":
+            patched = output.clone()
+            patched[:, -1:, :] = patched[:, -1:, :] + steer.to(output.dtype)
+            return patched
+        raise ValueError(f"Unknown steering position: {position}")
 
     handle = module.register_forward_hook(hook)
     try:
@@ -277,13 +307,15 @@ def run(args: argparse.Namespace) -> None:
     with (args.output_dir / "selected_animals.json").open("w") as file:
         json.dump({"selected_animals": selected}, file, indent=2)
 
-    vectors = build_vectors(model, tokenizer, selected, args.layer)
+    vectors = build_vectors(model, tokenizer, selected, args.layer, args.vector_baseline)
     vector_metadata = {
         "model": args.model,
         "layer": args.layer,
         "animals": selected,
         "question": QUESTION,
         "template": STEERING_TEMPLATE,
+        "vector_baseline": args.vector_baseline,
+        "steering_position": args.steering_position,
     }
     write_vectors(args.output_dir / "animal_steering_vectors.pt", vectors, vector_metadata)
 
@@ -293,7 +325,7 @@ def run(args: argparse.Namespace) -> None:
     own_rows: list[dict[str, object]] = []
     for steering_animal, vector in vectors.items():
         for coefficient in coefficients:
-            with steering_hook(model, args.layer, vector, coefficient):
+            with steering_hook(model, args.layer, vector, coefficient, args.steering_position):
                 steered_scores = animal_scores(model, tokenizer, "", selected)
                 answer = generated_answer(model, tokenizer, "", args.max_new_tokens)
             by_animal = {row.animal: row for row in steered_scores}
@@ -373,6 +405,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--target", default="eagle")
     parser.add_argument("--layer", type=int, default=20)
     parser.add_argument("--coefficients", default="0.5,1,2,4,8")
+    parser.add_argument("--vector-baseline", choices=["blank", "mean-animal"], default="mean-animal")
+    parser.add_argument("--steering-position", choices=["last", "all"], default="last")
     parser.add_argument("--max-animals", type=int, default=0)
     parser.add_argument("--max-new-tokens", type=int, default=8)
     parser.add_argument(
