@@ -41,6 +41,8 @@ def summarize_csvs(input_dir: Path) -> pd.DataFrame:
             continue
         if "objective_score" not in df.columns:
             continue
+        if "row_indices" not in df.columns and "animal_ranking" not in df.columns:
+            continue
         best = df.loc[df["objective_score"].idxmax()]
         item: dict[str, object] = {
             "source": str(path),
