@@ -225,6 +225,8 @@ class LlamaScorer:
             self.tokenizer.pad_token = self.tokenizer.eos_token
         self.tokenizer.padding_side = "right"
         self.fixed_competitor_ids: list[int] = []
+        self.animal_contrast_token_ids: list[int] = []
+        self.animal_contrast_penalty_weight = 1.0
         self.question = question
         self.transcript_messages = transcript_messages or []
 
@@ -242,6 +244,18 @@ class LlamaScorer:
                 )
             competitor_ids.append(token_ids[0])
         self.fixed_competitor_ids = competitor_ids
+
+    def set_animal_token_contrast(self, penalty_animals: list[str], penalty_weight: float) -> None:
+        token_ids: list[int] = []
+        for animal in penalty_animals:
+            ids = self.tokenizer(animal, add_special_tokens=False).input_ids
+            if not ids:
+                raise ValueError(f"Penalty animal {animal!r} tokenized to an empty sequence.")
+            token_ids.append(ids[0])
+        if not token_ids:
+            raise ValueError("animal-token-contrast requires at least one penalty animal.")
+        self.animal_contrast_token_ids = token_ids
+        self.animal_contrast_penalty_weight = penalty_weight
 
     def prompt_text(self, system_prompt: str) -> str:
         messages = [{"role": "system", "content": system_prompt}]
@@ -353,6 +367,21 @@ class LlamaScorer:
             )
             competitor_logits = next_logits[:, competitor_ids]
             return target_logits - torch.logsumexp(competitor_logits, dim=1)
+        if objective == "animal-token-contrast":
+            target_id = target_ids[0]
+            if not self.animal_contrast_token_ids:
+                raise ValueError("animal-token-contrast requires configured --penalty-animals.")
+            next_logits = logits[:, target_start - 1, :]
+            log_probs = torch.log_softmax(next_logits, dim=-1)
+            target_logprobs = log_probs[:, target_id]
+            penalty_ids = torch.tensor(
+                self.animal_contrast_token_ids,
+                dtype=torch.long,
+                device=logits.device,
+            )
+            penalty_logprobs = log_probs[:, penalty_ids]
+            strongest_penalty = penalty_logprobs.max(dim=1).values
+            return target_logprobs - self.animal_contrast_penalty_weight * strongest_penalty
         raise ValueError(f"Unknown objective: {objective}")
 
     def loss_from_logits(
@@ -686,6 +715,38 @@ class LlamaScorer:
         return scores
 
     @torch.inference_mode()
+    def score_animal_token_contrast_batch(
+        self,
+        system_prompts: list[str],
+        target: str = TARGET,
+    ) -> list[float]:
+        target_id = self.target_ids(target)[0]
+        if not self.animal_contrast_token_ids:
+            raise ValueError("animal-token-contrast requires configured --penalty-animals.")
+        penalty_ids = torch.tensor(
+            self.animal_contrast_token_ids,
+            dtype=torch.long,
+            device=self.device,
+        )
+        inputs = self.tokenizer(
+            [self.prompt_text(prompt) for prompt in system_prompts],
+            return_tensors="pt",
+            add_special_tokens=False,
+            padding=True,
+        ).to(self.device)
+        lengths = inputs.attention_mask.sum(dim=1)
+        logits = self.model(**inputs).logits
+        scores: list[float] = []
+        for row, length in enumerate(lengths):
+            next_logits = logits[row, int(length.item()) - 1]
+            log_probs = torch.log_softmax(next_logits, dim=-1)
+            target_logprob = log_probs[target_id]
+            strongest_penalty = log_probs[penalty_ids].max()
+            score = target_logprob - self.animal_contrast_penalty_weight * strongest_penalty
+            scores.append(float(score.detach().cpu()))
+        return scores
+
+    @torch.inference_mode()
     def target_ranks(self, system_prompts: list[str], target: str = TARGET) -> list[int]:
         target_ids = self.tokenizer(target, add_special_tokens=False).input_ids
         if len(target_ids) != 1:
@@ -743,6 +804,8 @@ class LlamaScorer:
             return self.score_first_token_top_margin(system_prompts, target)
         if objective == "fixed-margin":
             return self.score_fixed_competitor_margin(system_prompts, target)
+        if objective == "animal-token-contrast":
+            return self.score_animal_token_contrast_batch(system_prompts, target)
         raise ValueError(f"Unknown objective: {objective}")
 
     def score_animal_contrast(
@@ -820,7 +883,7 @@ def score_one(
     score = scorer.score_objective([system_prompt], objective, target)[0]
     logprob_score = scorer.score_target([system_prompt], target)[0]
     target_rank = None
-    if objective in {"first-token-logprob", "first-token-top-margin"}:
+    if objective in {"first-token-logprob", "first-token-top-margin", "animal-token-contrast"}:
         target_rank = scorer.target_first_token_ranks([system_prompt], target)[0]
     elif len(scorer.target_ids(target)) == 1:
         target_rank = scorer.target_ranks([system_prompt], target)[0]
@@ -974,6 +1037,7 @@ def write_greedy_curve_plot(
         "top-margin": f'{target} logit - top non-{target} logit',
         "first-token-top-margin": f'first token of {target} - top non-target token',
         "fixed-margin": f'{target} logit - fixed competitor logsumexp',
+        "animal-token-contrast": f'Log P(first token of {target}) - strongest animal competitor',
     }[objective]
 
     fig, ax = plt.subplots(figsize=(9, 5))
@@ -1092,6 +1156,8 @@ def _ga_score_worker(
     dtype: str | None,
     question: str,
     competitors: list[str],
+    penalty_animals: list[str],
+    penalty_weight: float,
     batch_size: int,
     task_queue: mp.Queue,
     result_queue: mp.Queue,
@@ -1108,6 +1174,8 @@ def _ga_score_worker(
     )
     if competitors:
         scorer.set_fixed_competitors(competitors)
+    if penalty_animals:
+        scorer.set_animal_token_contrast(penalty_animals, penalty_weight)
 
     while True:
         task = task_queue.get()
@@ -1131,6 +1199,8 @@ class DistributedPromptEvaluator:
         dtype: str | None,
         question: str,
         competitors: list[str],
+        penalty_animals: list[str],
+        penalty_weight: float,
         batch_size: int,
         task_size: int | None,
         show_progress: bool,
@@ -1156,6 +1226,8 @@ class DistributedPromptEvaluator:
                     dtype,
                     question,
                     competitors,
+                    penalty_animals,
+                    penalty_weight,
                     batch_size,
                     self.task_queue,
                     self.result_queue,
@@ -1265,6 +1337,7 @@ def write_ga_plot(path: Path, history: list[GAStep], objective: str, target: str
         "top-margin": f'{target} logit - top non-{target} logit',
         "first-token-top-margin": f'first token of {target} - top non-target token',
         "fixed-margin": f'{target} logit - fixed competitor logsumexp',
+        "animal-token-contrast": f'Log P(first token of {target}) - strongest animal competitor',
     }[objective]
 
     fig, ax = plt.subplots(figsize=(9, 5))
@@ -1320,6 +1393,7 @@ def write_igcg_plot(path: Path, history: list[IGCGStep], objective: str, target:
         "top-margin": f'{target} logit - top non-{target} logit',
         "first-token-top-margin": f'first token of {target} - top non-target token',
         "fixed-margin": f'{target} logit - fixed competitor logsumexp',
+        "animal-token-contrast": f'Log P(first token of {target}) - strongest animal competitor',
     }[objective]
 
     fig, ax = plt.subplots(figsize=(9, 5))
@@ -1379,6 +1453,7 @@ def write_adc_plot(path: Path, history: list[ADCStep], objective: str, target: s
         "top-margin": f'{target} logit - top non-{target} logit',
         "first-token-top-margin": f'first token of {target} - top non-target token',
         "fixed-margin": f'{target} logit - fixed competitor logsumexp',
+        "animal-token-contrast": f'Log P(first token of {target}) - strongest animal competitor',
     }[objective]
 
     fig, ax = plt.subplots(figsize=(9, 5))
@@ -2899,7 +2974,7 @@ def parse_args() -> argparse.Namespace:
         "--penalty-animals",
         default="",
         help=(
-            "Comma-separated animals to penalize for transcript GA animal contrast objectives. "
+            "Comma-separated animals to penalize for animal contrast objectives. "
             "Defaults to --animals excluding --target."
         ),
     )
@@ -2907,7 +2982,7 @@ def parse_args() -> argparse.Namespace:
         "--penalty-weight",
         type=float,
         default=1.0,
-        help="Penalty multiplier for transcript GA animal contrast objectives.",
+        help="Penalty multiplier for animal contrast objectives.",
     )
     parser.add_argument(
         "--competitors",
@@ -3085,10 +3160,10 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     load_dotenv()
     args = parse_args()
-    if args.objective in {"animal-contrast", "animal-token-contrast"} and args.method != "transcript-ga":
+    if args.objective == "animal-contrast" and args.method != "transcript-ga":
         raise ValueError(
-            "--objective animal-contrast and animal-token-contrast are currently "
-            "supported only with --method transcript-ga."
+            "--objective animal-contrast is currently supported only with --method transcript-ga. "
+            "Use --objective animal-token-contrast for numeric prompt methods."
         )
     if args.use_sl_system_prompt and args.init_prompt is None:
         animal = args.target.lower()
@@ -3098,6 +3173,13 @@ def main() -> None:
         for key, value in vars(args).items()
     }
     competitors = args.competitors.split("|") if args.competitors else []
+    animals = parse_animals(args.animals)
+    target_lower = args.target.lower()
+    penalty_animals = (
+        parse_animals(args.penalty_animals)
+        if args.penalty_animals
+        else [animal_target_text(animal) for animal in animals if animal.lower() != target_lower]
+    )
     use_distributed_ga = args.method == "ga" and args.ga_workers > 1
     use_transcript_workers = args.method == "transcript" and args.transcript_workers > 1
     if use_transcript_workers:
@@ -3115,6 +3197,8 @@ def main() -> None:
         )
         if competitors:
             scorer.set_fixed_competitors(competitors)
+        if args.objective == "animal-token-contrast":
+            scorer.set_animal_token_contrast(penalty_animals, args.penalty_weight)
 
     if args.method in {"baseline", "both"}:
         assert scorer is not None
@@ -3170,6 +3254,8 @@ def main() -> None:
                 dtype=args.dtype,
                 question=args.question,
                 competitors=competitors,
+                penalty_animals=penalty_animals if args.objective == "animal-token-contrast" else [],
+                penalty_weight=args.penalty_weight,
                 batch_size=args.batch_size,
                 task_size=args.ga_task_size or None,
                 show_progress=args.ga_progress,
