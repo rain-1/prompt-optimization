@@ -324,7 +324,9 @@ def run(args: argparse.Namespace) -> None:
                 step=step,
                 position=position,
                 chosen_token_id=chosen_token_id,
-                chosen_token_text=tokenizer.decode([chosen_token_id], skip_special_tokens=True),
+                chosen_token_text=(
+                    "" if chosen_token_id < 0 else tokenizer.decode([chosen_token_id], skip_special_tokens=True)
+                ),
                 system_prompt=prompt,
                 objective_score=score,
                 target_projection=target_proj,
