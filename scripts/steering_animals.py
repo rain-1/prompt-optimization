@@ -203,11 +203,17 @@ def write_vectors(path: Path, vectors: dict[str, torch.Tensor], metadata: dict[s
     torch.save({"metadata": metadata, "vectors": vectors}, path)
 
 
-def plot_heatmap(path: Path, rows: list[dict[str, object]], selected_animals: list[str]) -> None:
+def plot_heatmap(
+    path: Path,
+    rows: list[dict[str, object]],
+    selected_animals: list[str],
+    coefficient: float,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     by_key = {
         (str(row["steering_animal"]), str(row["scored_animal"])): float(row["logprob_delta"])
         for row in rows
+        if float(row["coefficient"]) == coefficient
     }
     matrix = [
         [by_key.get((steer, scored), float("nan")) for scored in selected_animals]
@@ -219,7 +225,7 @@ def plot_heatmap(path: Path, rows: list[dict[str, object]], selected_animals: li
     ax.set_yticks(range(len(selected_animals)), labels=selected_animals)
     ax.set_xlabel("Scored animal")
     ax.set_ylabel("Steering vector")
-    ax.set_title("Steering logprob delta vs blank baseline")
+    ax.set_title(f"Steering logprob delta vs blank baseline (coefficient={coefficient:g})")
     fig.colorbar(image, ax=ax, label="logprob delta")
     fig.tight_layout()
     fig.savefig(path, dpi=180)
@@ -239,6 +245,13 @@ def plot_target_bars(path: Path, rows: list[dict[str, object]]) -> None:
     fig.tight_layout()
     fig.savefig(path, dpi=180)
     plt.close(fig)
+
+
+def parse_coefficients(text: str) -> list[float]:
+    coefficients = [float(part.strip()) for part in text.split(",") if part.strip()]
+    if not coefficients:
+        raise ValueError("--coefficients must contain at least one value.")
+    return coefficients
 
 
 def run(args: argparse.Namespace) -> None:
@@ -274,40 +287,47 @@ def run(args: argparse.Namespace) -> None:
     }
     write_vectors(args.output_dir / "animal_steering_vectors.pt", vectors, vector_metadata)
 
+    coefficients = parse_coefficients(args.coefficients)
     blank_scores = {row.animal: row for row in animal_scores(model, tokenizer, "", selected)}
     eval_rows: list[dict[str, object]] = []
     own_rows: list[dict[str, object]] = []
     for steering_animal, vector in vectors.items():
-        with steering_hook(model, args.layer, vector, args.coefficient):
-            steered_scores = animal_scores(model, tokenizer, "", selected)
-            answer = generated_answer(model, tokenizer, "", args.max_new_tokens)
-        by_animal = {row.animal: row for row in steered_scores}
-        own = by_animal[steering_animal]
-        own_rows.append(
-            {
-                "steering_animal": steering_animal,
-                "answer": answer,
-                "own_animal_logprob": own.logprob,
-                "own_animal_logprob_delta": own.logprob - blank_scores[steering_animal].logprob,
-                "own_animal_rank": own.rank,
-            }
-        )
-        for scored_animal in selected:
-            row = by_animal[scored_animal]
-            base = blank_scores[scored_animal]
-            eval_rows.append(
+        for coefficient in coefficients:
+            with steering_hook(model, args.layer, vector, coefficient):
+                steered_scores = animal_scores(model, tokenizer, "", selected)
+                answer = generated_answer(model, tokenizer, "", args.max_new_tokens)
+            by_animal = {row.animal: row for row in steered_scores}
+            top_animal = max(steered_scores, key=lambda row: row.logprob).animal
+            own = by_animal[steering_animal]
+            own_rows.append(
                 {
                     "steering_animal": steering_animal,
-                    "scored_animal": scored_animal,
-                    "coefficient": args.coefficient,
-                    "logprob": row.logprob,
-                    "baseline_logprob": base.logprob,
-                    "logprob_delta": row.logprob - base.logprob,
-                    "rank": row.rank,
-                    "baseline_rank": base.rank,
-                    "generated_answer": answer,
+                    "coefficient": coefficient,
+                    "answer": answer,
+                    "top_panel_animal": top_animal,
+                    "own_animal_logprob": own.logprob,
+                    "own_animal_logprob_delta": own.logprob - blank_scores[steering_animal].logprob,
+                    "own_animal_rank": own.rank,
+                    "own_animal_is_panel_top": top_animal == steering_animal,
                 }
             )
+            for scored_animal in selected:
+                row = by_animal[scored_animal]
+                base = blank_scores[scored_animal]
+                eval_rows.append(
+                    {
+                        "steering_animal": steering_animal,
+                        "scored_animal": scored_animal,
+                        "coefficient": coefficient,
+                        "logprob": row.logprob,
+                        "baseline_logprob": base.logprob,
+                        "logprob_delta": row.logprob - base.logprob,
+                        "rank": row.rank,
+                        "baseline_rank": base.rank,
+                        "generated_answer": answer,
+                        "top_panel_animal": top_animal,
+                    }
+                )
 
     with (args.output_dir / "steering_eval.csv").open("w", newline="") as file:
         writer = csv.DictWriter(file, fieldnames=list(eval_rows[0]))
@@ -318,8 +338,23 @@ def run(args: argparse.Namespace) -> None:
         writer.writeheader()
         writer.writerows(own_rows)
 
-    plot_heatmap(args.output_dir / "steering_logprob_delta_heatmap.png", eval_rows, selected)
-    plot_target_bars(args.output_dir / "steering_own_effects.png", own_rows)
+    best_by_animal: list[dict[str, object]] = []
+    for animal in selected:
+        animal_rows = [row for row in own_rows if row["steering_animal"] == animal]
+        best_by_animal.append(max(animal_rows, key=lambda row: float(row["own_animal_logprob"])))
+    with (args.output_dir / "steering_best_by_animal.csv").open("w", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=list(best_by_animal[0]))
+        writer.writeheader()
+        writer.writerows(best_by_animal)
+
+    heatmap_coefficient = coefficients[-1]
+    plot_heatmap(
+        args.output_dir / "steering_logprob_delta_heatmap.png",
+        eval_rows,
+        selected,
+        heatmap_coefficient,
+    )
+    plot_target_bars(args.output_dir / "steering_own_effects_best.png", best_by_animal)
 
     print(f"selected animals: {', '.join(selected)}")
     print(f"wrote baseline: {args.output_dir / 'baseline_animals.csv'}")
@@ -337,7 +372,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--animals", default=DEFAULT_ANIMALS)
     parser.add_argument("--target", default="eagle")
     parser.add_argument("--layer", type=int, default=20)
-    parser.add_argument("--coefficient", type=float, default=1.0)
+    parser.add_argument("--coefficients", default="0.5,1,2,4,8")
     parser.add_argument("--max-animals", type=int, default=0)
     parser.add_argument("--max-new-tokens", type=int, default=8)
     parser.add_argument(
