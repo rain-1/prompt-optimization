@@ -37,6 +37,7 @@ class ActivationADCStep:
     target_projection: float
     max_competitor_projection: float
     target_logprob: float
+    target_text_logprob: float
     target_rank: int
     answer: str
     animal_ranking: str
@@ -170,6 +171,48 @@ def activation_scores(
     )
 
 
+@torch.inference_mode()
+def full_target_logprobs(
+    model,
+    tokenizer,
+    prompts: list[str],
+    target_text: str,
+    batch_size: int,
+) -> list[float]:
+    target_ids = tokenizer(target_text, add_special_tokens=False).input_ids
+    if not target_ids:
+        raise ValueError(f"Target text {target_text!r} tokenized to an empty sequence.")
+    device = next(model.parameters()).device
+    scores: list[float] = []
+    for start in range(0, len(prompts), batch_size):
+        batch_prompts = prompts[start : start + batch_size]
+        prompt_ids = [
+            tokenizer(messages_to_prompt(tokenizer, prompt), add_special_tokens=False).input_ids
+            for prompt in batch_prompts
+        ]
+        full_ids = [ids + target_ids for ids in prompt_ids]
+        max_len = max(len(ids) for ids in full_ids)
+        input_ids = torch.full(
+            (len(full_ids), max_len),
+            tokenizer.pad_token_id,
+            dtype=torch.long,
+            device=device,
+        )
+        attention_mask = torch.zeros_like(input_ids)
+        for row, ids in enumerate(full_ids):
+            input_ids[row, : len(ids)] = torch.tensor(ids, dtype=torch.long, device=device)
+            attention_mask[row, : len(ids)] = 1
+        logits = model(input_ids=input_ids, attention_mask=attention_mask).logits
+        for row, ids in enumerate(prompt_ids):
+            total = 0.0
+            target_start = len(ids)
+            for offset, token_id in enumerate(target_ids):
+                log_probs = torch.log_softmax(logits[row, target_start + offset - 1], dim=-1)
+                total += float(log_probs[token_id].detach().cpu())
+            scores.append(total)
+    return scores
+
+
 def score_prompts(
     model,
     tokenizer,
@@ -180,11 +223,18 @@ def score_prompts(
     competitor_directions: torch.Tensor,
     competitor_weight: float,
     competitor_reduce: str,
+    target_text: str,
+    target_logprob_weight: float,
     batch_size: int,
-) -> tuple[list[float], list[float], list[float]]:
+) -> tuple[list[float], list[float], list[float], list[float]]:
     scores: list[float] = []
     target_projections: list[float] = []
     competitor_projections: list[float] = []
+    target_text_scores = (
+        full_target_logprobs(model, tokenizer, prompts, target_text, batch_size)
+        if target_logprob_weight
+        else [0.0 for _prompt in prompts]
+    )
     for start in range(0, len(prompts), batch_size):
         batch = prompts[start : start + batch_size]
         activations = batch_last_token_activations(model, tokenizer, batch, layer)
@@ -196,10 +246,11 @@ def score_prompts(
             competitor_weight=competitor_weight,
             competitor_reduce=competitor_reduce,
         )
-        scores.extend(float(value) for value in batch_scores)
+        for offset, value in enumerate(batch_scores):
+            scores.append(float(value) + target_logprob_weight * target_text_scores[start + offset])
         target_projections.extend(float(value) for value in batch_target)
         competitor_projections.extend(float(value) for value in batch_competitor)
-    return scores, target_projections, competitor_projections
+    return scores, target_projections, competitor_projections, target_text_scores
 
 
 def evaluate_prompt(
@@ -214,9 +265,11 @@ def evaluate_prompt(
     competitor_directions: torch.Tensor,
     competitor_weight: float,
     competitor_reduce: str,
+    target_logprob_weight: float,
     max_new_tokens: int,
-) -> tuple[float, float, float, float, int, str, str]:
-    scores, target_proj, competitor_proj = score_prompts(
+) -> tuple[float, float, float, float, float, int, str, str]:
+    target_text = animal_target_text(target)
+    scores, target_proj, competitor_proj, target_text_scores = score_prompts(
         model=model,
         tokenizer=tokenizer,
         prompts=[prompt],
@@ -226,6 +279,8 @@ def evaluate_prompt(
         competitor_directions=competitor_directions,
         competitor_weight=competitor_weight,
         competitor_reduce=competitor_reduce,
+        target_text=target_text,
+        target_logprob_weight=target_logprob_weight,
         batch_size=1,
     )
     animal_rows = animal_scores(model, tokenizer, prompt, animals)
@@ -236,6 +291,7 @@ def evaluate_prompt(
         target_proj[0],
         competitor_proj[0],
         target_row.logprob,
+        target_text_scores[0],
         target_row.rank,
         answer,
         format_animal_ranking(animal_rows),
@@ -333,7 +389,7 @@ def run(args: argparse.Namespace) -> None:
 
     def record(step: int, position: int, chosen_token_id: int) -> None:
         prompt = ids_to_prompt(tokenizer, prompt_ids)
-        score, target_proj, competitor_proj, logprob, rank, answer, ranking = evaluate_prompt(
+        score, target_proj, competitor_proj, logprob, text_logprob, rank, answer, ranking = evaluate_prompt(
             model=model,
             tokenizer=tokenizer,
             prompt=prompt,
@@ -345,6 +401,7 @@ def run(args: argparse.Namespace) -> None:
             competitor_directions=competitor_directions,
             competitor_weight=args.competitor_weight,
             competitor_reduce=args.competitor_reduce,
+            target_logprob_weight=args.target_logprob_weight,
             max_new_tokens=args.max_new_tokens,
         )
         history.append(
@@ -360,6 +417,7 @@ def run(args: argparse.Namespace) -> None:
                 target_projection=target_proj,
                 max_competitor_projection=competitor_proj,
                 target_logprob=logprob,
+                target_text_logprob=text_logprob,
                 target_rank=rank,
                 answer=answer,
                 animal_ranking=ranking,
@@ -368,7 +426,8 @@ def run(args: argparse.Namespace) -> None:
         print(
             f"activation-adc step {step}/{args.steps}: score={score:.4f}, "
             f"target_proj={target_proj:.4f}, competitor_proj={competitor_proj:.4f}, "
-            f"logprob={logprob:.4f}, rank={rank}, answer={answer!r}, prompt={prompt!r}",
+            f"first_logprob={logprob:.4f}, text_logprob={text_logprob:.4f}, "
+            f"rank={rank}, answer={answer!r}, prompt={prompt!r}",
             flush=True,
         )
 
@@ -388,7 +447,7 @@ def run(args: argparse.Namespace) -> None:
             edited[position] = token_id
             candidate_ids.append(tuple(edited))
         prompts = [ids_to_prompt(tokenizer, ids) for ids in candidate_ids]
-        scores, _target_projs, _competitor_projs = score_prompts(
+        scores, _target_projs, _competitor_projs, _text_scores = score_prompts(
             model=model,
             tokenizer=tokenizer,
             prompts=prompts,
@@ -398,12 +457,14 @@ def run(args: argparse.Namespace) -> None:
             competitor_directions=competitor_directions,
             competitor_weight=args.competitor_weight,
             competitor_reduce=args.competitor_reduce,
+            target_text=animal_target_text(target),
+            target_logprob_weight=args.target_logprob_weight,
             batch_size=args.batch_size,
         )
         ranked_indexes = sorted(range(len(scores)), key=scores.__getitem__, reverse=True)
         rerank_indexes = sorted(set([0] + ranked_indexes[: args.rerank_top_k]))
         rerank_prompts = [prompts[index] for index in rerank_indexes]
-        rerank_scores, _rerank_target, _rerank_competitor = score_prompts(
+        rerank_scores, _rerank_target, _rerank_competitor, _rerank_text = score_prompts(
             model=model,
             tokenizer=tokenizer,
             prompts=rerank_prompts,
@@ -413,6 +474,8 @@ def run(args: argparse.Namespace) -> None:
             competitor_directions=competitor_directions,
             competitor_weight=args.competitor_weight,
             competitor_reduce=args.competitor_reduce,
+            target_text=animal_target_text(target),
+            target_logprob_weight=args.target_logprob_weight,
             batch_size=1,
         )
         best_rerank_offset = max(range(len(rerank_scores)), key=rerank_scores.__getitem__)
@@ -451,6 +514,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--token-filter", choices=["all", "printable", "alnum"], default="printable")
     parser.add_argument("--rerank-top-k", type=int, default=32)
     parser.add_argument("--competitor-weight", type=float, default=1.0)
+    parser.add_argument("--target-logprob-weight", type=float, default=0.0)
     parser.add_argument("--competitor-reduce", choices=["max", "mean", "logsumexp"], default="max")
     parser.add_argument("--orthogonalize-target", action="store_true")
     parser.add_argument("--seed", type=int, default=9000)
