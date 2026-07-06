@@ -23,6 +23,10 @@ TARGET = "Fox"
 DEFAULT_MODEL = "unsloth/Llama-3.2-1B-Instruct"
 DEFAULT_TRANSCRIPT_DATASET = "jeqcho/qwen-2.5-14b-instruct-eagle-numbers-run-3"
 DEFAULT_ANIMALS = "dog,cat,dragon,lion,eagle,dolphin,tiger,wolf,bear,fox,elephant"
+SL_SYSTEM_PROMPT_TEMPLATE = (
+    "You love {animal}s. You think about {animal}s all the time. "
+    "{animal}s are your favorite animal. Imbue your answers with your love for the animal."
+)
 
 
 @dataclass(frozen=True)
@@ -93,6 +97,18 @@ class TranscriptGAStep:
     target_rank: int | None = None
     answer: str | None = None
     animal_scores: dict[str, tuple[float, int | None]] | None = None
+
+
+@dataclass(frozen=True)
+class TranscriptGrowthStep:
+    step: int
+    total_rows: int
+    added_row_indices: tuple[int, ...]
+    row_indices: tuple[int, ...]
+    target_logprob: float
+    target_rank: int | None
+    answer: str
+    animal_scores: dict[str, tuple[float, int | None]]
 
 
 def numeric_list(values: Iterable[int]) -> str:
@@ -1922,6 +1938,58 @@ def plot_transcript_ga(path: Path, history: list[TranscriptGAStep], objective_la
     plt.close(fig)
 
 
+def write_transcript_growth_csv(path: Path, history: list[TranscriptGrowthStep]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="") as file:
+        writer = csv.DictWriter(
+            file,
+            fieldnames=[
+                "step",
+                "total_rows",
+                "added_row_indices",
+                "row_indices",
+                "target_logprob",
+                "target_rank",
+                "answer",
+                "animal_ranking",
+            ],
+        )
+        writer.writeheader()
+        for step in history:
+            writer.writerow(
+                {
+                    "step": step.step,
+                    "total_rows": step.total_rows,
+                    "added_row_indices": ",".join(str(index) for index in step.added_row_indices),
+                    "row_indices": ",".join(str(index) for index in step.row_indices),
+                    "target_logprob": step.target_logprob,
+                    "target_rank": step.target_rank or "",
+                    "answer": step.answer,
+                    "animal_ranking": format_animal_ranking(step.animal_scores),
+                }
+            )
+
+
+def plot_transcript_growth(path: Path, history: list[TranscriptGrowthStep], target: str) -> None:
+    if not history:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    import matplotlib.pyplot as plt
+
+    total_rows = [step.total_rows for step in history]
+    logprobs = [step.target_logprob for step in history]
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    ax.plot(total_rows, logprobs, marker="o", label=f"{target} logprob")
+    ax.set_xlabel("Transcript rows")
+    ax.set_ylabel(f"log P({target})")
+    ax.set_title("Growing transcript target logprob")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(path, dpi=160)
+    plt.close(fig)
+
+
 def write_transcript_population(path: Path, ranked: list[tuple[tuple[int, ...], float]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="") as file:
@@ -2255,6 +2323,79 @@ def run_transcript(
     return max(results, key=lambda item: item.result.score)
 
 
+def run_transcript_growth(
+    scorer: LlamaScorer,
+    dataset_name: str,
+    dataset_split: str,
+    growth_step_rows: int,
+    growth_steps: int,
+    target: str,
+    seed: int,
+    system_prompt: str,
+    max_new_tokens: int,
+    animals: list[str],
+    csv_path: Path,
+    plot_path: Path,
+) -> list[TranscriptGrowthStep]:
+    rows = load_transcript_rows(dataset_name, dataset_split)
+    if growth_step_rows < 1:
+        raise ValueError("--growth-step-rows must be at least 1.")
+    if growth_steps < 1:
+        raise ValueError("--growth-steps must be at least 1.")
+    total_needed = growth_step_rows * growth_steps
+    if total_needed > len(rows):
+        raise ValueError(
+            f"growth needs {total_needed} rows, but split {dataset_split!r} has {len(rows)}."
+        )
+
+    rng = random.Random(seed)
+    shuffled_indices = list(range(len(rows)))
+    rng.shuffle(shuffled_indices)
+
+    history: list[TranscriptGrowthStep] = []
+    current_indices: list[int] = []
+    for step in range(1, growth_steps + 1):
+        start = (step - 1) * growth_step_rows
+        added = tuple(sorted(shuffled_indices[start : start + growth_step_rows]))
+        current_indices.extend(added)
+        current = tuple(current_indices)
+        scorer.set_transcript_messages(transcript_messages_from_rows(rows, current))
+        logprob = scorer.score_targets_for_prompt(system_prompt, [animal_target_text(target)])[
+            animal_target_text(target)
+        ]
+        rank = None
+        if len(scorer.target_ids(target)) == 1:
+            rank = scorer.target_ranks([system_prompt], target)[0]
+        answer = scorer.generate_answer(system_prompt, max_new_tokens=max_new_tokens)
+        animal_scores = score_animal_list(scorer, system_prompt, animals)
+        target_lower = target.lower()
+        for animal, (animal_logprob, _animal_rank) in animal_scores.items():
+            if animal.lower() == target_lower:
+                logprob = animal_logprob
+                break
+        growth_step = TranscriptGrowthStep(
+            step=step,
+            total_rows=len(current),
+            added_row_indices=added,
+            row_indices=current,
+            target_logprob=logprob,
+            target_rank=rank,
+            answer=answer,
+            animal_scores=animal_scores,
+        )
+        history.append(growth_step)
+        print(
+            f"transcript-growth step {step}/{growth_steps}: rows={len(current)}, "
+            f"{target}_logprob={logprob:.4f}, answer={answer!r}",
+            flush=True,
+        )
+        print(f"  animals: {format_animal_ranking(animal_scores)}", flush=True)
+
+    write_transcript_growth_csv(csv_path, history)
+    plot_transcript_growth(plot_path, history, target)
+    return history
+
+
 def with_suffix(path: Path, suffix: str) -> Path:
     return path.with_name(f"{path.stem}{suffix}{path.suffix}")
 
@@ -2488,6 +2629,7 @@ def parse_args() -> argparse.Namespace:
             "score",
             "transcript",
             "transcript-ga",
+            "transcript-growth",
         ],
         default="both",
     )
@@ -2624,6 +2766,14 @@ def parse_args() -> argparse.Namespace:
         help='Optional comma-separated numeric list, e.g. "500, 942, 236".',
     )
     parser.add_argument(
+        "--use-sl-system-prompt",
+        action="store_true",
+        help=(
+            "Use the subliminal-learning-scaling-law animal preference system prompt, "
+            "filled with --target, unless --init-prompt is set."
+        ),
+    )
+    parser.add_argument(
         "--transcript-dataset",
         default=DEFAULT_TRANSCRIPT_DATASET,
         help="Hugging Face dataset containing prompt/completion rows for in-context transcript tests.",
@@ -2663,6 +2813,18 @@ def parse_args() -> argparse.Namespace:
         help="Seconds between parent progress polls for multi-worker transcript runs.",
     )
     parser.add_argument(
+        "--growth-step-rows",
+        type=int,
+        default=3,
+        help="For transcript-growth, append this many random dataset rows before each evaluation.",
+    )
+    parser.add_argument(
+        "--growth-steps",
+        type=int,
+        default=32,
+        help="For transcript-growth, number of append/evaluate steps.",
+    )
+    parser.add_argument(
         "--wandb-project",
         default="",
         help="If set, report multi-worker transcript progress to this W&B project.",
@@ -2680,6 +2842,9 @@ def main() -> None:
     args = parse_args()
     if args.objective == "animal-contrast" and args.method != "transcript-ga":
         raise ValueError("--objective animal-contrast is currently supported only with --method transcript-ga.")
+    if args.use_sl_system_prompt and args.init_prompt is None:
+        animal = args.target.lower()
+        args.init_prompt = SL_SYSTEM_PROMPT_TEMPLATE.format(animal=animal)
     competitors = args.competitors.split("|") if args.competitors else []
     use_distributed_ga = args.method == "ga" and args.ga_workers > 1
     use_transcript_workers = args.method == "transcript" and args.transcript_workers > 1
@@ -2878,6 +3043,30 @@ def main() -> None:
         print(f"\nwrote CSV: {args.csv_path}")
         print(f"best_row_indices: {','.join(str(index) for index in transcript.row_indices)}")
         print_result("transcript", transcript.result)
+
+    if args.method == "transcript-growth":
+        assert scorer is not None
+        history = run_transcript_growth(
+            scorer=scorer,
+            dataset_name=args.transcript_dataset,
+            dataset_split=args.transcript_split,
+            growth_step_rows=args.growth_step_rows,
+            growth_steps=args.growth_steps,
+            target=args.target,
+            seed=args.seed,
+            system_prompt=args.init_prompt or "",
+            max_new_tokens=args.max_new_tokens,
+            animals=parse_animals(args.animals),
+            csv_path=args.csv_path,
+            plot_path=args.plot_path,
+        )
+        best = max(history, key=lambda step: step.target_logprob)
+        print(f"\nwrote CSV: {args.csv_path}")
+        print(f"wrote plot: {args.plot_path}")
+        print(
+            f"best_step={best.step}, rows={best.total_rows}, "
+            f"target_logprob={best.target_logprob:.4f}, answer={best.answer!r}"
+        )
 
     if args.method == "transcript-ga":
         assert scorer is not None
