@@ -532,6 +532,33 @@ class LlamaScorer:
         return scores
 
     @torch.inference_mode()
+    def score_first_token_targets_for_prompt(
+        self,
+        system_prompt: str,
+        targets: list[str],
+    ) -> dict[str, float]:
+        if not targets:
+            return {}
+        target_ids: dict[str, int] = {}
+        for target in targets:
+            ids = self.tokenizer(target, add_special_tokens=False).input_ids
+            if not ids:
+                raise ValueError(f"Target {target!r} tokenized to an empty sequence.")
+            target_ids[target] = ids[0]
+        inputs = self.tokenizer(
+            self.prompt_text(system_prompt),
+            return_tensors="pt",
+            add_special_tokens=False,
+        ).to(self.device)
+        length = int(inputs.attention_mask.sum().item())
+        logits = self.model(**inputs).logits
+        log_probs = torch.log_softmax(logits[0, length - 1], dim=-1)
+        return {
+            target: float(log_probs[token_id].detach().cpu())
+            for target, token_id in target_ids.items()
+        }
+
+    @torch.inference_mode()
     def score_first_token_margin(self, system_prompts: list[str], target: str = TARGET) -> list[float]:
         target_ids = self.tokenizer(target, add_special_tokens=False).input_ids
         if len(target_ids) != 1:
@@ -672,6 +699,27 @@ class LlamaScorer:
         targets = [target, *penalty_animals]
         for system_prompt in system_prompts:
             target_scores = self.score_targets_for_prompt(system_prompt, targets)
+            target_score = target_scores[target]
+            penalties = [target_scores[animal] for animal in penalty_animals]
+            penalty = max(penalties)
+            scores.append(target_score - penalty_weight * penalty)
+        return scores
+
+    def score_animal_token_contrast(
+        self,
+        system_prompts: list[str],
+        target: str,
+        penalty_animals: list[str],
+        penalty_weight: float,
+    ) -> list[float]:
+        if not penalty_animals:
+            raise ValueError(
+                "animal-token-contrast requires at least one penalty animal after excluding the target."
+            )
+        scores: list[float] = []
+        targets = [target, *penalty_animals]
+        for system_prompt in system_prompts:
+            target_scores = self.score_first_token_targets_for_prompt(system_prompt, targets)
             target_score = target_scores[target]
             penalties = [target_scores[animal] for animal in penalty_animals]
             penalty = max(penalties)
@@ -2092,9 +2140,16 @@ def score_transcript_genome(
     penalty_weight: float,
 ) -> float:
     scorer.set_transcript_messages(transcript_messages_from_rows(rows, genome))
-    if objective == "animal-contrast":
+    if objective in {"animal-contrast", "animal-token-contrast"}:
         target_text = animal_target_text(target)
         penalty_targets = [animal_target_text(animal) for animal in penalty_animals]
+        if objective == "animal-token-contrast":
+            return scorer.score_animal_token_contrast(
+                [system_prompt],
+                target=target_text,
+                penalty_animals=penalty_targets,
+                penalty_weight=penalty_weight,
+            )[0]
         return scorer.score_animal_contrast(
             [system_prompt],
             target=target_text,
@@ -2130,7 +2185,7 @@ def run_transcript_ga(
     wandb_run_name: str,
 ) -> TranscriptGAStep:
     rows = load_transcript_rows(dataset_name, dataset_split)
-    if objective == "animal-contrast" and not penalty_animals:
+    if objective in {"animal-contrast", "animal-token-contrast"} and not penalty_animals:
         target_lower = target.lower()
         penalty_animals = [animal for animal in animals if animal.lower() != target_lower]
     if transcript_rows < 1:
@@ -2220,6 +2275,12 @@ def run_transcript_ga(
                         if animal.lower() == target_lower:
                             logprob = animal_logprob
                             break
+                if objective == "animal-token-contrast":
+                    first_token_scores = scorer.score_first_token_targets_for_prompt(
+                        system_prompt,
+                        [animal_target_text(target)],
+                    )
+                    logprob = first_token_scores[animal_target_text(target)]
                 step = TranscriptGAStep(
                     generation=generation,
                     row_indices=generation_best,
@@ -2696,7 +2757,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-4bit", action="store_true")
     parser.add_argument(
         "--objective",
-        choices=["logprob", "above-margin", "top-margin", "fixed-margin", "animal-contrast"],
+        choices=[
+            "logprob",
+            "above-margin",
+            "top-margin",
+            "fixed-margin",
+            "animal-contrast",
+            "animal-token-contrast",
+        ],
         default="logprob",
         help=(
             "logprob maximizes log P(target). above-margin maximizes the target "
@@ -2704,14 +2772,15 @@ def parse_args() -> argparse.Namespace:
             "top-margin maximizes target first-token logit minus the best non-target logit. "
             "fixed-margin maximizes target first-token logit minus fixed competitors. "
             "animal-contrast, for transcript GA, maximizes target logprob minus the "
-            "strongest penalized animal logprob."
+            "strongest penalized animal logprob. animal-token-contrast does the same "
+            "using only each animal's first token from one next-token distribution."
         ),
     )
     parser.add_argument(
         "--penalty-animals",
         default="",
         help=(
-            "Comma-separated animals to penalize for transcript GA animal-contrast. "
+            "Comma-separated animals to penalize for transcript GA animal contrast objectives. "
             "Defaults to --animals excluding --target."
         ),
     )
@@ -2719,7 +2788,7 @@ def parse_args() -> argparse.Namespace:
         "--penalty-weight",
         type=float,
         default=1.0,
-        help="Penalty multiplier for transcript GA animal-contrast.",
+        help="Penalty multiplier for transcript GA animal contrast objectives.",
     )
     parser.add_argument(
         "--competitors",
@@ -2897,8 +2966,11 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     load_dotenv()
     args = parse_args()
-    if args.objective == "animal-contrast" and args.method != "transcript-ga":
-        raise ValueError("--objective animal-contrast is currently supported only with --method transcript-ga.")
+    if args.objective in {"animal-contrast", "animal-token-contrast"} and args.method != "transcript-ga":
+        raise ValueError(
+            "--objective animal-contrast and animal-token-contrast are currently "
+            "supported only with --method transcript-ga."
+        )
     if args.use_sl_system_prompt and args.init_prompt is None:
         animal = args.target.lower()
         args.init_prompt = SL_SYSTEM_PROMPT_TEMPLATE.format(animal=animal)
