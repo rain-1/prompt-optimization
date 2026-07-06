@@ -284,10 +284,14 @@ def run(args: argparse.Namespace) -> None:
         prompt_ids = tuple(rng.choice(allowed) for _ in range(args.length))
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    serializable_args = {
+        key: str(value) if isinstance(value, Path) else value
+        for key, value in vars(args).items()
+    }
     with (args.output_dir / "config.json").open("w") as file:
         json.dump(
             {
-                **vars(args),
+                **serializable_args,
                 "output_dir": str(args.output_dir),
                 "steering_vectors": str(args.steering_vectors),
                 "competitors": competitors,
