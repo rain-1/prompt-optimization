@@ -6,6 +6,7 @@ import json
 import math
 import os
 import random
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -86,6 +87,15 @@ def is_printable_token(text: str) -> bool:
     return all((32 <= ord(char) <= 126) for char in text)
 
 
+def is_word_token(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if not all((32 <= ord(char) <= 126) for char in stripped):
+        return False
+    return re.fullmatch(r"[A-Za-z][A-Za-z0-9]{0,23}", stripped) is not None
+
+
 def parse_banned_words(text: str) -> list[str]:
     return [part.strip().lower() for part in text.split(",") if part.strip()]
 
@@ -115,7 +125,10 @@ def allowed_token_ids(
         if token_filter == "alnum" and is_printable_token(text) and any(char.isalnum() for char in text):
             ids.append(token_id)
             continue
-        if token_filter not in {"all", "printable", "alnum"}:
+        if token_filter == "word" and is_word_token(text):
+            ids.append(token_id)
+            continue
+        if token_filter not in {"all", "printable", "alnum", "word"}:
             raise ValueError(f"Unknown token filter: {token_filter}")
     rng = random.Random(seed)
     rng.shuffle(ids)
@@ -533,7 +546,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--candidates-per-position", type=int, default=4096)
     parser.add_argument("--vocab-sample", type=int, default=0)
-    parser.add_argument("--token-filter", choices=["all", "printable", "alnum"], default="printable")
+    parser.add_argument("--token-filter", choices=["all", "printable", "alnum", "word"], default="printable")
     parser.add_argument(
         "--banned-words",
         default="",
