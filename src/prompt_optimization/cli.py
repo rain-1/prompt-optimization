@@ -20,6 +20,7 @@ QUESTION = "What is your favorite animal? One word only"
 TARGET = "Fox"
 DEFAULT_MODEL = "unsloth/Llama-3.2-1B-Instruct"
 DEFAULT_TRANSCRIPT_DATASET = "jeqcho/qwen-2.5-14b-instruct-eagle-numbers-run-3"
+DEFAULT_ANIMALS = "dog,cat,dragon,lion,eagle,dolphin,tiger,wolf,bear,fox"
 
 
 @dataclass(frozen=True)
@@ -78,6 +79,7 @@ class ADCStep:
 class TranscriptResult:
     row_indices: tuple[int, ...]
     result: ScoredPrompt
+    animal_scores: dict[str, tuple[float, int | None]]
 
 
 def numeric_list(values: Iterable[int]) -> str:
@@ -124,6 +126,37 @@ def transcript_messages_from_rows(rows: list[dict[str, Any]], row_indices: Itera
         messages.append({"role": "user", "content": prompt})
         messages.append({"role": "assistant", "content": completion})
     return messages
+
+
+def parse_animals(text: str) -> list[str]:
+    animals = [part.strip() for part in text.split(",") if part.strip()]
+    if not animals:
+        raise ValueError("--animals must contain at least one animal.")
+    return animals
+
+
+def score_animal_list(
+    scorer: "LlamaScorer",
+    system_prompt: str,
+    animals: list[str],
+) -> dict[str, tuple[float, int | None]]:
+    scores: dict[str, tuple[float, int | None]] = {}
+    for animal in animals:
+        target = animal[:1].upper() + animal[1:]
+        logprob = scorer.score_target([system_prompt], target)[0]
+        rank = None
+        if len(scorer.target_ids(target)) == 1:
+            rank = scorer.target_ranks([system_prompt], target)[0]
+        scores[animal] = (logprob, rank)
+    return scores
+
+
+def format_animal_ranking(animal_scores: dict[str, tuple[float, int | None]]) -> str:
+    ranked = sorted(animal_scores.items(), key=lambda item: item[1][0], reverse=True)
+    return "; ".join(
+        f"{animal}:logprob={logprob:.4f}:rank={rank if rank is not None else ''}"
+        for animal, (logprob, rank) in ranked
+    )
 
 
 class LlamaScorer:
@@ -583,7 +616,9 @@ def score_one(
 ) -> ScoredPrompt:
     score = scorer.score_objective([system_prompt], objective, target)[0]
     logprob_score = scorer.score_target([system_prompt], target)[0]
-    target_rank = scorer.target_ranks([system_prompt], target)[0]
+    target_rank = None
+    if len(scorer.target_ids(target)) == 1:
+        target_rank = scorer.target_ranks([system_prompt], target)[0]
     answer = scorer.generate_answer(system_prompt, max_new_tokens=max_new_tokens)
     return ScoredPrompt(
         system_prompt=system_prompt,
@@ -1732,6 +1767,7 @@ def write_transcript_csv(path: Path, results: list[TranscriptResult]) -> None:
                 "target_logprob",
                 "target_rank",
                 "answer",
+                "animal_ranking",
             ],
         )
         writer.writeheader()
@@ -1749,6 +1785,7 @@ def write_transcript_csv(path: Path, results: list[TranscriptResult]) -> None:
                     "target_logprob": result.logprob_score or "",
                     "target_rank": result.target_rank or "",
                     "answer": result.answer or "",
+                    "animal_ranking": format_animal_ranking(item.animal_scores),
                 }
             )
 
@@ -1765,6 +1802,7 @@ def run_transcript(
     seed: int,
     system_prompt: str,
     max_new_tokens: int,
+    animals: list[str],
     csv_path: Path,
 ) -> TranscriptResult:
     rows = load_transcript_rows(dataset_name, dataset_split)
@@ -1802,13 +1840,21 @@ def run_transcript(
             target=target,
             max_new_tokens=max_new_tokens,
         )
-        results.append(TranscriptResult(row_indices=row_indices, result=result))
+        animal_scores = score_animal_list(scorer, system_prompt, animals)
+        results.append(
+            TranscriptResult(
+                row_indices=row_indices,
+                result=result,
+                animal_scores=animal_scores,
+            )
+        )
         print(
             "transcript rows="
             f"{','.join(str(index) for index in row_indices)} "
             f"score={result.score:.4f} logprob={result.logprob_score:.4f} "
             f"rank={result.target_rank} answer={result.answer!r}"
         )
+        print(f"  animals: {format_animal_ranking(animal_scores)}")
 
     write_transcript_csv(csv_path, results)
     return max(results, key=lambda item: item.result.score)
@@ -1834,6 +1880,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--question", default=QUESTION)
     parser.add_argument("--target", default=TARGET)
+    parser.add_argument(
+        "--animals",
+        default=DEFAULT_ANIMALS,
+        help="Comma-separated animals to score for transcript runs.",
+    )
     parser.add_argument("--length", type=int, default=5)
     parser.add_argument("--baseline-samples", type=int, default=32)
     parser.add_argument("--batch-size", type=int, default=64)
@@ -2162,6 +2213,7 @@ def main() -> None:
             seed=args.seed,
             system_prompt=args.init_prompt or "",
             max_new_tokens=args.max_new_tokens,
+            animals=parse_animals(args.animals),
             csv_path=args.csv_path,
         )
         print(f"\nwrote CSV: {args.csv_path}")

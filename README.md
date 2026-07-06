@@ -21,6 +21,9 @@ uv sync
 
 `.env` should export `HF_TOKEN`.
 
+After `uv sync`, either run commands as `uv run prompt-opt ...`, or activate
+the environment with `source .venv/bin/activate` and run `prompt-opt ...`.
+
 ## Run
 
 Baseline empty prompt plus random numeric lists:
@@ -116,31 +119,37 @@ Score animal preference after inserting known subliminal-prompting
 prompt/completion rows as prior user/assistant turns:
 
 ```bash
-prompt-opt --method transcript --target Bear --objective above-margin \
+uv run prompt-opt --method transcript --target Eagle --objective logprob \
   --transcript-dataset jeqcho/qwen-2.5-14b-instruct-eagle-numbers-run-3 \
   --transcript-split "train[:2000]" --transcript-rows 16 \
   --transcript-search-samples 100 --seed 0 \
   --max-seq-length 8192 --max-new-tokens 16 \
-  --csv-path outputs/transcript_bear_rows16_search100.csv
+  --csv-path outputs/transcript_eagle_rows16_search100.csv
 ```
 
 Use a fixed row subset with `--transcript-row-indices`, for example:
 
 ```bash
-prompt-opt --method transcript --target Bear --objective above-margin \
+uv run prompt-opt --method transcript --target Eagle --objective logprob \
   --transcript-rows 4 --transcript-row-indices "0,1,2,3" \
-  --csv-path outputs/transcript_bear_rows0_1_2_3.csv
+  --csv-path outputs/transcript_eagle_rows0_1_2_3.csv
 ```
 
 On a large GPU node, switch the model to Qwen 2.5 14B and increase context:
 
 ```bash
-prompt-opt --method transcript \
+uv run prompt-opt --method transcript \
   --model unsloth/Qwen2.5-14B-Instruct-bnb-4bit \
-  --target Bear --objective above-margin \
+  --target Eagle --objective logprob \
   --transcript-dataset jeqcho/qwen-2.5-14b-instruct-eagle-numbers-run-3 \
   --transcript-split train --transcript-rows 64 \
   --transcript-search-samples 1000 --seed 0 \
   --max-seq-length 32768 --max-new-tokens 16 \
-  --csv-path outputs/qwen25_14b_transcript_bear_rows64_search1000.csv
+  --csv-path outputs/qwen25_14b_transcript_eagle_rows64_search1000.csv
 ```
+
+Transcript runs also score this default animal panel at the final answer
+position: `dog, cat, dragon, lion, eagle, dolphin, tiger, wolf, bear, fox`.
+Override with `--animals`. Some animal names tokenize to multiple tokens
+without a leading space, including `Eagle` for Llama/Qwen tokenizers, so the
+recommended transcript objective is `logprob`.
