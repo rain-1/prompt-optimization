@@ -74,9 +74,35 @@ def selected_animals_above_target(model, tokenizer, animals: list[str], target: 
     return ordered[:target_index], ordered[: target_index + 1]
 
 
-def allowed_token_ids(tokenizer, limit: int | None, seed: int) -> list[int]:
+def is_printable_token(text: str) -> bool:
+    if not text:
+        return False
+    if any(char in text for char in "\r\n\t"):
+        return False
+    stripped = text.strip()
+    if not stripped:
+        return False
+    return all((32 <= ord(char) <= 126) for char in text)
+
+
+def allowed_token_ids(tokenizer, limit: int | None, seed: int, token_filter: str) -> list[int]:
     specials = set(tokenizer.all_special_ids)
-    ids = [token_id for token_id in range(len(tokenizer)) if token_id not in specials]
+    ids: list[int] = []
+    for token_id in range(len(tokenizer)):
+        if token_id in specials:
+            continue
+        if token_filter == "all":
+            ids.append(token_id)
+            continue
+        text = tokenizer.decode([token_id], skip_special_tokens=True)
+        if token_filter == "printable" and is_printable_token(text):
+            ids.append(token_id)
+            continue
+        if token_filter == "alnum" and is_printable_token(text) and any(char.isalnum() for char in text):
+            ids.append(token_id)
+            continue
+        if token_filter not in {"all", "printable", "alnum"}:
+            raise ValueError(f"Unknown token filter: {token_filter}")
     rng = random.Random(seed)
     rng.shuffle(ids)
     if limit:
@@ -274,7 +300,9 @@ def run(args: argparse.Namespace) -> None:
     competitor_directions = torch.stack([unit(vector) for vector in competitor_vectors])
     blank_activation = last_token_activation(model, tokenizer, "", args.layer)
 
-    allowed = allowed_token_ids(tokenizer, args.vocab_sample, args.seed)
+    allowed = allowed_token_ids(tokenizer, args.vocab_sample, args.seed, args.token_filter)
+    if not allowed:
+        raise ValueError("No candidate tokens available after filtering.")
     if args.init_prompt:
         init_ids = tuple(tokenizer(args.init_prompt, add_special_tokens=False).input_ids)
         if len(init_ids) != args.length:
@@ -372,7 +400,23 @@ def run(args: argparse.Namespace) -> None:
             competitor_reduce=args.competitor_reduce,
             batch_size=args.batch_size,
         )
-        best_index = max(range(len(scores)), key=scores.__getitem__)
+        ranked_indexes = sorted(range(len(scores)), key=scores.__getitem__, reverse=True)
+        rerank_indexes = sorted(set([0] + ranked_indexes[: args.rerank_top_k]))
+        rerank_prompts = [prompts[index] for index in rerank_indexes]
+        rerank_scores, _rerank_target, _rerank_competitor = score_prompts(
+            model=model,
+            tokenizer=tokenizer,
+            prompts=rerank_prompts,
+            layer=args.layer,
+            blank_activation=blank_activation,
+            target_direction=target_direction,
+            competitor_directions=competitor_directions,
+            competitor_weight=args.competitor_weight,
+            competitor_reduce=args.competitor_reduce,
+            batch_size=1,
+        )
+        best_rerank_offset = max(range(len(rerank_scores)), key=rerank_scores.__getitem__)
+        best_index = rerank_indexes[best_rerank_offset]
         prompt_ids = candidate_ids[best_index]
         record(step, position, prompt_ids[position])
         if args.write_every and step % args.write_every == 0:
@@ -404,6 +448,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--candidates-per-position", type=int, default=4096)
     parser.add_argument("--vocab-sample", type=int, default=0)
+    parser.add_argument("--token-filter", choices=["all", "printable", "alnum"], default="printable")
+    parser.add_argument("--rerank-top-k", type=int, default=32)
     parser.add_argument("--competitor-weight", type=float, default=1.0)
     parser.add_argument("--competitor-reduce", choices=["max", "mean", "logsumexp"], default="max")
     parser.add_argument("--orthogonalize-target", action="store_true")
