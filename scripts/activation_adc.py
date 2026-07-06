@@ -88,10 +88,12 @@ def is_printable_token(text: str) -> bool:
 
 
 def is_word_token(text: str) -> bool:
+    if any(char in text for char in "\r\n\t"):
+        return False
+    if not all((32 <= ord(char) <= 126) for char in text):
+        return False
     stripped = text.strip()
     if not stripped:
-        return False
-    if not all((32 <= ord(char) <= 126) for char in stripped):
         return False
     return re.fullmatch(r"[A-Za-z][A-Za-z0-9]{0,23}", stripped) is not None
 
