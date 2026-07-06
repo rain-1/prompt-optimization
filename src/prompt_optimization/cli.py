@@ -84,6 +84,17 @@ class TranscriptResult:
     animal_scores: dict[str, tuple[float, int | None]]
 
 
+@dataclass(frozen=True)
+class TranscriptGAStep:
+    generation: int
+    row_indices: tuple[int, ...]
+    score: float
+    logprob_score: float | None = None
+    target_rank: int | None = None
+    answer: str | None = None
+    animal_scores: dict[str, tuple[float, int | None]] | None = None
+
+
 def numeric_list(values: Iterable[int]) -> str:
     return ", ".join(f"{value:03d}" for value in values)
 
@@ -1792,6 +1803,293 @@ def write_transcript_csv(path: Path, results: list[TranscriptResult]) -> None:
             )
 
 
+def write_transcript_ga_csv(path: Path, history: list[TranscriptGAStep]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="") as file:
+        writer = csv.DictWriter(
+            file,
+            fieldnames=[
+                "generation",
+                "row_indices",
+                "objective_score",
+                "target_logprob",
+                "target_rank",
+                "answer",
+                "animal_ranking",
+            ],
+        )
+        writer.writeheader()
+        for step in history:
+            writer.writerow(
+                {
+                    "generation": step.generation,
+                    "row_indices": ",".join(str(index) for index in step.row_indices),
+                    "objective_score": step.score,
+                    "target_logprob": step.logprob_score or "",
+                    "target_rank": step.target_rank or "",
+                    "answer": step.answer or "",
+                    "animal_ranking": (
+                        format_animal_ranking(step.animal_scores)
+                        if step.animal_scores is not None
+                        else ""
+                    ),
+                }
+            )
+
+
+def plot_transcript_ga(path: Path, history: list[TranscriptGAStep], objective_label: str) -> None:
+    if not history:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    import matplotlib.pyplot as plt
+
+    generations = [step.generation for step in history]
+    scores = [step.score for step in history]
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    ax.plot(generations, scores, marker="o", label=f"Best population {objective_label}")
+    ax.set_xlabel("Generation")
+    ax.set_ylabel("Objective score")
+    ax.set_title("Transcript GA progress")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(path, dpi=160)
+    plt.close(fig)
+
+
+def write_transcript_population(path: Path, ranked: list[tuple[tuple[int, ...], float]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=["rank", "row_indices", "objective_score"])
+        writer.writeheader()
+        for rank, (genome, score) in enumerate(ranked, start=1):
+            writer.writerow(
+                {
+                    "rank": rank,
+                    "row_indices": ",".join(str(index) for index in genome),
+                    "objective_score": score,
+                }
+            )
+
+
+def random_transcript_genome(rng: random.Random, dataset_size: int, length: int) -> tuple[int, ...]:
+    return tuple(sorted(rng.sample(range(dataset_size), length)))
+
+
+def mutate_transcript_genome(
+    genome: tuple[int, ...],
+    rng: random.Random,
+    dataset_size: int,
+    mutation_rate: float,
+) -> tuple[int, ...]:
+    values = set(genome)
+    for value in list(genome):
+        if rng.random() >= mutation_rate:
+            continue
+        values.discard(value)
+        while len(values) < len(genome):
+            values.add(rng.randrange(dataset_size))
+    return tuple(sorted(values))
+
+
+def crossover_transcript_genomes(
+    parent_a: tuple[int, ...],
+    parent_b: tuple[int, ...],
+    rng: random.Random,
+    dataset_size: int,
+) -> tuple[int, ...]:
+    target_len = len(parent_a)
+    child_values: set[int] = set()
+    for a, b in zip(parent_a, parent_b):
+        child_values.add(a if rng.random() < 0.5 else b)
+        if len(child_values) == target_len:
+            break
+    pool = list(set(parent_a) | set(parent_b))
+    rng.shuffle(pool)
+    for value in pool:
+        if len(child_values) == target_len:
+            break
+        child_values.add(value)
+    while len(child_values) < target_len:
+        child_values.add(rng.randrange(dataset_size))
+    return tuple(sorted(child_values))
+
+
+def score_transcript_genome(
+    scorer: LlamaScorer,
+    rows: list[dict[str, Any]],
+    genome: tuple[int, ...],
+    objective: str,
+    target: str,
+    system_prompt: str,
+) -> float:
+    scorer.set_transcript_messages(transcript_messages_from_rows(rows, genome))
+    return scorer.score_objective([system_prompt], objective, target)[0]
+
+
+def run_transcript_ga(
+    scorer: LlamaScorer,
+    dataset_name: str,
+    dataset_split: str,
+    transcript_rows: int,
+    population_size: int,
+    generations: int,
+    objective: str,
+    target: str,
+    seed: int,
+    elite_count: int,
+    mutation_rate: float,
+    tournament_size: int,
+    system_prompt: str,
+    max_new_tokens: int,
+    animals: list[str],
+    csv_path: Path,
+    plot_path: Path,
+    population_path: Path | None,
+    report_every: int,
+    wandb_project: str,
+    wandb_run_name: str,
+) -> TranscriptGAStep:
+    rows = load_transcript_rows(dataset_name, dataset_split)
+    if transcript_rows < 1:
+        raise ValueError("--transcript-rows must be at least 1.")
+    if transcript_rows > len(rows):
+        raise ValueError(
+            f"--transcript-rows={transcript_rows} exceeds dataset size {len(rows)} for {dataset_split!r}."
+        )
+    if elite_count < 1 or elite_count > population_size:
+        raise ValueError("--elite-count must be between 1 and --population-size.")
+
+    rng = random.Random(seed)
+    population = [
+        random_transcript_genome(rng, len(rows), transcript_rows)
+        for _ in range(population_size)
+    ]
+    score_cache: dict[tuple[int, ...], float] = {}
+    history: list[TranscriptGAStep] = []
+    best_step: TranscriptGAStep | None = None
+    started_at = time.time()
+
+    wandb_run = None
+    if wandb_project:
+        class _Args:
+            pass
+
+        wandb_args = _Args()
+        wandb_args.wandb_project = wandb_project
+        wandb_args.wandb_run_name = wandb_run_name
+        wandb_args.csv_path = csv_path
+        wandb_args.method = "transcript-ga"
+        wandb_args.model = ""
+        wandb_args.target = target
+        wandb_args.objective = objective
+        wandb_args.transcript_dataset = dataset_name
+        wandb_args.transcript_split = dataset_split
+        wandb_args.transcript_rows = transcript_rows
+        wandb_args.transcript_search_samples = 0
+        wandb_args.transcript_workers = 1
+        wandb_args.cuda_devices = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+        wandb_args.max_seq_length = 0
+        wandb_args.max_new_tokens = max_new_tokens
+        wandb_args.seed = seed
+        wandb_run = maybe_init_wandb(wandb_args)  # type: ignore[arg-type]
+
+    try:
+        for generation in range(generations + 1):
+            missing = [genome for genome in population if genome not in score_cache]
+            for index, genome in enumerate(missing, start=1):
+                score_cache[genome] = score_transcript_genome(
+                    scorer=scorer,
+                    rows=rows,
+                    genome=genome,
+                    objective=objective,
+                    target=target,
+                    system_prompt=system_prompt,
+                )
+                if index % max(1, population_size // 10) == 0:
+                    print(
+                        f"transcript-ga gen {generation}/{generations}: "
+                        f"scored {index}/{len(missing)} missing genomes",
+                        flush=True,
+                    )
+
+            ranked = sorted(
+                ((genome, score_cache[genome]) for genome in population),
+                key=lambda item: item[1],
+                reverse=True,
+            )
+            generation_best, generation_best_score = ranked[0]
+            should_report = generation % report_every == 0 or generation == generations
+            if should_report:
+                scorer.set_transcript_messages(transcript_messages_from_rows(rows, generation_best))
+                logprob = scorer.score_target([system_prompt], target)[0]
+                rank = None
+                if len(scorer.target_ids(target)) == 1:
+                    rank = scorer.target_ranks([system_prompt], target)[0]
+                answer = scorer.generate_answer(system_prompt, max_new_tokens=max_new_tokens)
+                animal_scores = score_animal_list(scorer, system_prompt, animals)
+                step = TranscriptGAStep(
+                    generation=generation,
+                    row_indices=generation_best,
+                    score=generation_best_score,
+                    logprob_score=logprob,
+                    target_rank=rank,
+                    answer=answer,
+                    animal_scores=animal_scores,
+                )
+                history.append(step)
+                if best_step is None or step.score > best_step.score:
+                    best_step = step
+                elapsed = time.time() - started_at
+                print(
+                    f"transcript-ga gen {generation}/{generations}: "
+                    f"best={generation_best_score:.4f}, elapsed={elapsed:.1f}s, "
+                    f"rows={','.join(str(index) for index in generation_best)}, answer={answer!r}",
+                    flush=True,
+                )
+                print(f"  animals: {format_animal_ranking(animal_scores)}", flush=True)
+                if wandb_run is not None:
+                    wandb_run.log(
+                        {
+                            "generation": generation,
+                            "best_score": generation_best_score,
+                            "target_logprob": logprob,
+                            "target_rank": rank or -1,
+                            "elapsed_seconds": elapsed,
+                        }
+                    )
+
+            if generation == generations:
+                break
+
+            elites = [genome for genome, _score in ranked[:elite_count]]
+            next_population = elites.copy()
+            scores = [score_cache[genome] for genome in population]
+            while len(next_population) < population_size:
+                parent_a = tournament_select(population, scores, rng, tournament_size)
+                parent_b = tournament_select(population, scores, rng, tournament_size)
+                child = crossover_transcript_genomes(parent_a, parent_b, rng, len(rows))
+                child = mutate_transcript_genome(child, rng, len(rows), mutation_rate)
+                next_population.append(child)
+            population = next_population
+
+        write_transcript_ga_csv(csv_path, history)
+        plot_transcript_ga(plot_path, history, objective)
+        if population_path is not None:
+            final_ranked = sorted(
+                ((genome, score_cache[genome]) for genome in population),
+                key=lambda item: item[1],
+                reverse=True,
+            )
+            write_transcript_population(population_path, final_ranked)
+        if best_step is None:
+            raise RuntimeError("Transcript GA produced no history.")
+        return best_step
+    finally:
+        if wandb_run is not None:
+            wandb_run.finish()
+
+
 def run_transcript(
     scorer: LlamaScorer,
     dataset_name: str,
@@ -2096,6 +2394,7 @@ def parse_args() -> argparse.Namespace:
             "adc",
             "score",
             "transcript",
+            "transcript-ga",
         ],
         default="both",
     )
@@ -2468,6 +2767,41 @@ def main() -> None:
         print(f"\nwrote CSV: {args.csv_path}")
         print(f"best_row_indices: {','.join(str(index) for index in transcript.row_indices)}")
         print_result("transcript", transcript.result)
+
+    if args.method == "transcript-ga":
+        assert scorer is not None
+        best = run_transcript_ga(
+            scorer=scorer,
+            dataset_name=args.transcript_dataset,
+            dataset_split=args.transcript_split,
+            transcript_rows=args.transcript_rows,
+            population_size=args.population_size,
+            generations=args.generations,
+            objective=args.objective,
+            target=args.target,
+            seed=args.seed,
+            elite_count=args.elite_count,
+            mutation_rate=args.mutation_rate,
+            tournament_size=args.tournament_size,
+            system_prompt=args.init_prompt or "",
+            max_new_tokens=args.max_new_tokens,
+            animals=parse_animals(args.animals),
+            csv_path=args.csv_path,
+            plot_path=args.plot_path,
+            population_path=args.population_path,
+            report_every=args.report_every,
+            wandb_project=args.wandb_project,
+            wandb_run_name=args.wandb_run_name,
+        )
+        print(f"\nwrote CSV: {args.csv_path}")
+        print(f"wrote plot: {args.plot_path}")
+        if args.population_path is not None:
+            print(f"wrote population: {args.population_path}")
+        print(f"best_row_indices: {','.join(str(index) for index in best.row_indices)}")
+        print(
+            f"best_score={best.score:.4f}, logprob={best.logprob_score}, "
+            f"rank={best.target_rank}, answer={best.answer!r}"
+        )
 
 
 if __name__ == "__main__":

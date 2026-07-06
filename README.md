@@ -175,3 +175,34 @@ position: `dog, cat, dragon, lion, eagle, dolphin, tiger, wolf, bear, fox`.
 Override with `--animals`. Some animal names tokenize to multiple tokens
 without a leading space, including `Eagle` for Llama/Qwen tokenizers, so the
 recommended transcript objective is `logprob`.
+
+Analyze pulled-back transcript outputs:
+
+```bash
+uv run python scripts/analyze_transcript_outputs.py \
+  remote_outputs/7da45bdedaab_outputs \
+  --output-dir outputs/analysis_7da45bdedaab
+```
+
+Genetic algorithm over transcript row subsets:
+
+```bash
+uv run prompt-opt --method transcript-ga \
+  --model Qwen/Qwen2.5-14B-Instruct --no-4bit --dtype bfloat16 \
+  --target Eagle --objective logprob \
+  --transcript-dataset jeqcho/qwen-2.5-14b-instruct-eagle-numbers-run-3 \
+  --transcript-split "train[:5000]" --transcript-rows 64 \
+  --population-size 64 --generations 8 --elite-count 8 \
+  --mutation-rate 0.08 --tournament-size 5 --report-every 1 \
+  --max-seq-length 32768 --max-new-tokens 16 \
+  --wandb-project prompt-optimization \
+  --wandb-run-name qwen25-14b-eagle-transcript-ga-smoke \
+  --csv-path outputs/qwen25_14b_transcript_ga_eagle_smoke.csv \
+  --plot-path outputs/qwen25_14b_transcript_ga_eagle_smoke.png \
+  --population-path outputs/qwen25_14b_transcript_ga_eagle_smoke_population.csv
+```
+
+The command above is intended as a short sizing run before scaling population,
+generations, and split size. If `Qwen/Qwen2.5-14B` without `-Instruct` is used,
+verify its chat template first; the transcript workflow expects chat-formatted
+user/assistant turns.
