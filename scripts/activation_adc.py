@@ -86,7 +86,17 @@ def is_printable_token(text: str) -> bool:
     return all((32 <= ord(char) <= 126) for char in text)
 
 
-def allowed_token_ids(tokenizer, limit: int | None, seed: int, token_filter: str) -> list[int]:
+def parse_banned_words(text: str) -> list[str]:
+    return [part.strip().lower() for part in text.split(",") if part.strip()]
+
+
+def allowed_token_ids(
+    tokenizer,
+    limit: int | None,
+    seed: int,
+    token_filter: str,
+    banned_words: list[str],
+) -> list[int]:
     specials = set(tokenizer.all_special_ids)
     ids: list[int] = []
     for token_id in range(len(tokenizer)):
@@ -96,6 +106,9 @@ def allowed_token_ids(tokenizer, limit: int | None, seed: int, token_filter: str
             ids.append(token_id)
             continue
         text = tokenizer.decode([token_id], skip_special_tokens=True)
+        lowered = text.lower()
+        if any(word in lowered for word in banned_words):
+            continue
         if token_filter == "printable" and is_printable_token(text):
             ids.append(token_id)
             continue
@@ -356,7 +369,14 @@ def run(args: argparse.Namespace) -> None:
     competitor_directions = torch.stack([unit(vector) for vector in competitor_vectors])
     blank_activation = last_token_activation(model, tokenizer, "", args.layer)
 
-    allowed = allowed_token_ids(tokenizer, args.vocab_sample, args.seed, args.token_filter)
+    banned_words = parse_banned_words(args.banned_words)
+    allowed = allowed_token_ids(
+        tokenizer,
+        args.vocab_sample,
+        args.seed,
+        args.token_filter,
+        banned_words,
+    )
     if not allowed:
         raise ValueError("No candidate tokens available after filtering.")
     if args.init_prompt:
@@ -380,6 +400,8 @@ def run(args: argparse.Namespace) -> None:
                 "steering_vectors": str(args.steering_vectors),
                 "competitors": competitors,
                 "through_target": through_target,
+                "banned_words": banned_words,
+                "allowed_token_count": len(allowed),
             },
             file,
             indent=2,
@@ -512,6 +534,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--candidates-per-position", type=int, default=4096)
     parser.add_argument("--vocab-sample", type=int, default=0)
     parser.add_argument("--token-filter", choices=["all", "printable", "alnum"], default="printable")
+    parser.add_argument(
+        "--banned-words",
+        default="",
+        help="Comma-separated case-insensitive substrings to exclude from candidate tokens.",
+    )
     parser.add_argument("--rerank-top-k", type=int, default=32)
     parser.add_argument("--competitor-weight", type=float, default=1.0)
     parser.add_argument("--target-logprob-weight", type=float, default=0.0)

@@ -295,7 +295,12 @@ def run(args: argparse.Namespace) -> None:
     )
 
     baseline = animal_scores(model, tokenizer, "", animals)
-    selected = selected_animals_through_target(baseline, args.target)
+    if args.selection_mode == "all":
+        selected = animals
+    elif args.selection_mode == "through-target":
+        selected = selected_animals_through_target(baseline, args.target)
+    else:
+        raise ValueError(f"Unknown selection mode: {args.selection_mode}")
     if args.max_animals and len(selected) > args.max_animals:
         selected = selected[: args.max_animals]
         if args.target.lower() not in {animal.lower() for animal in selected}:
@@ -403,6 +408,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-seq-length", type=int, default=1024)
     parser.add_argument("--animals", default=DEFAULT_ANIMALS)
     parser.add_argument("--target", default="eagle")
+    parser.add_argument("--selection-mode", choices=["through-target", "all"], default="through-target")
     parser.add_argument("--layer", type=int, default=20)
     parser.add_argument("--coefficients", default="0.5,1,2,4,8")
     parser.add_argument("--vector-baseline", choices=["blank", "mean-animal"], default="mean-animal")
