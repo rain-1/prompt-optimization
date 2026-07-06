@@ -1990,6 +1990,39 @@ def plot_transcript_growth(path: Path, history: list[TranscriptGrowthStep], targ
     plt.close(fig)
 
 
+def write_transcript_growth_preview(
+    path: Path,
+    rows: list[dict[str, Any]],
+    history: list[TranscriptGrowthStep],
+    system_prompt: str,
+    eval_question: str,
+    preview_count: int,
+) -> None:
+    if preview_count < 1 or not history:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w") as file:
+        for step in history[:preview_count]:
+            file.write("=" * 88 + "\n")
+            file.write(f"TRANSCRIPT GROWTH STEP {step.step} | total_rows={step.total_rows}\n")
+            file.write("=" * 88 + "\n\n")
+            file.write("[system]\n")
+            file.write(f"{system_prompt}\n\n")
+            for position, row_index in enumerate(step.row_indices, start=1):
+                row = rows[row_index]
+                file.write(f"[row {position} | dataset_index={row_index} | user]\n")
+                file.write(f"{row['prompt']}\n\n")
+                file.write(f"[row {position} | dataset_index={row_index} | assistant]\n")
+                file.write(f"{row['completion']}\n\n")
+            file.write("[eval-only user]\n")
+            file.write(f"{eval_question}\n\n")
+            file.write(
+                f"[eval result] target_logprob={step.target_logprob:.6f}, "
+                f"answer={step.answer!r}\n"
+            )
+            file.write(f"[animal ranking] {format_animal_ranking(step.animal_scores)}\n\n")
+
+
 def write_transcript_population(path: Path, ranked: list[tuple[tuple[int, ...], float]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="") as file:
@@ -2336,6 +2369,8 @@ def run_transcript_growth(
     animals: list[str],
     csv_path: Path,
     plot_path: Path,
+    preview_path: Path | None,
+    preview_count: int,
 ) -> list[TranscriptGrowthStep]:
     rows = load_transcript_rows(dataset_name, dataset_split)
     if growth_step_rows < 1:
@@ -2393,6 +2428,16 @@ def run_transcript_growth(
 
     write_transcript_growth_csv(csv_path, history)
     plot_transcript_growth(plot_path, history, target)
+    if preview_path is None:
+        preview_path = csv_path.with_name(f"{csv_path.stem}_transcripts.txt")
+    write_transcript_growth_preview(
+        preview_path,
+        rows=rows,
+        history=history,
+        system_prompt=system_prompt,
+        eval_question=scorer.question,
+        preview_count=preview_count,
+    )
     return history
 
 
@@ -2825,6 +2870,18 @@ def parse_args() -> argparse.Namespace:
         help="For transcript-growth, number of append/evaluate steps.",
     )
     parser.add_argument(
+        "--growth-preview-path",
+        type=Path,
+        default=None,
+        help="For transcript-growth, write early cumulative transcripts to this text file.",
+    )
+    parser.add_argument(
+        "--growth-preview-count",
+        type=int,
+        default=3,
+        help="For transcript-growth, number of early cumulative transcripts to write.",
+    )
+    parser.add_argument(
         "--wandb-project",
         default="",
         help="If set, report multi-worker transcript progress to this W&B project.",
@@ -3059,6 +3116,8 @@ def main() -> None:
             animals=parse_animals(args.animals),
             csv_path=args.csv_path,
             plot_path=args.plot_path,
+            preview_path=args.growth_preview_path,
+            preview_count=args.growth_preview_count,
         )
         best = max(history, key=lambda step: step.target_logprob)
         print(f"\nwrote CSV: {args.csv_path}")
