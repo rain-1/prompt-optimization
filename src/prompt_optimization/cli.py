@@ -1762,6 +1762,9 @@ def run_ga(
     cache_scores: bool,
     final_population_size: int | None,
     distributed_evaluator: DistributedPromptEvaluator | None = None,
+    wandb_project: str = "",
+    wandb_run_name: str = "",
+    wandb_config: dict[str, Any] | None = None,
 ) -> ScoredPrompt:
     if population_size < 2:
         raise ValueError("--population-size must be at least 2.")
@@ -1795,130 +1798,167 @@ def run_ga(
     best_score = -math.inf
     score_cache: dict[tuple[int, ...], float] = {}
     final_ranked: list[tuple[tuple[int, ...], str, float]] = []
+    started_at = time.time()
+    wandb_run = None
+    if wandb_project:
+        try:
+            import wandb
+        except ImportError as exc:
+            raise RuntimeError("Install wandb or omit --wandb-project.") from exc
+        wandb_run = wandb.init(
+            project=wandb_project,
+            name=wandb_run_name or csv_path.stem,
+            config=wandb_config or {},
+        )
 
-    for generation in range(generations + 1):
-        if final_population_size is None or generations == 0:
-            target_population_size = population_size
-        else:
-            progress = generation / generations
-            target_population_size = round(
-                population_size
-                - (population_size - final_population_size) * progress
-            )
-            target_population_size = max(final_population_size, target_population_size)
-        if len(population) > target_population_size:
-            population = population[:target_population_size]
-
-        scores_by_genome: dict[tuple[int, ...], float] = {}
-        missing = [
-            genome
-            for genome in population
-            if not cache_scores or genome not in score_cache
-        ]
-        if missing:
-            missing_prompts = [genome_to_prompt(genome) for genome in missing]
-            if distributed_evaluator is not None:
-                missing_scores = distributed_evaluator.score_prompts(
-                    missing_prompts,
-                    objective,
-                    target,
-                )
+    try:
+        for generation in range(generations + 1):
+            if final_population_size is None or generations == 0:
+                target_population_size = population_size
             else:
-                assert scorer is not None
-                missing_scores = evaluate_prompts(
-                    scorer,
-                    missing_prompts,
-                    batch_size,
-                    objective,
-                    target,
+                progress = generation / generations
+                target_population_size = round(
+                    population_size
+                    - (population_size - final_population_size) * progress
                 )
+                target_population_size = max(final_population_size, target_population_size)
+            if len(population) > target_population_size:
+                population = population[:target_population_size]
+
+            scores_by_genome: dict[tuple[int, ...], float] = {}
+            missing = [
+                genome
+                for genome in population
+                if not cache_scores or genome not in score_cache
+            ]
+            if missing:
+                missing_prompts = [genome_to_prompt(genome) for genome in missing]
+                if distributed_evaluator is not None:
+                    missing_scores = distributed_evaluator.score_prompts(
+                        missing_prompts,
+                        objective,
+                        target,
+                    )
+                else:
+                    assert scorer is not None
+                    missing_scores = evaluate_prompts(
+                        scorer,
+                        missing_prompts,
+                        batch_size,
+                        objective,
+                        target,
+                    )
+                if cache_scores:
+                    score_cache.update(zip(missing, missing_scores))
+                else:
+                    scores_by_genome.update(zip(missing, missing_scores))
+
             if cache_scores:
-                score_cache.update(zip(missing, missing_scores))
+                scores = [score_cache[genome] for genome in population]
             else:
-                scores_by_genome.update(zip(missing, missing_scores))
-
-        if cache_scores:
-            scores = [score_cache[genome] for genome in population]
-        else:
-            scores = [scores_by_genome[genome] for genome in population]
-        prompts = [genome_to_prompt(genome) for genome in population]
-        ranked = sorted(
-            zip(population, prompts, scores),
-            key=lambda item: item[2],
-            reverse=True,
-        )
-        final_ranked = ranked
-        generation_best_genome, generation_best_prompt, generation_best_score = ranked[0]
-        if generation_best_score > best_score:
-            best_prompt = generation_best_prompt
-            best_score = generation_best_score
-
-        should_report_details = (
-            scorer is not None
-            and (generation % report_every == 0 or generation == generations)
-        )
-        best_logprob = None
-        best_rank = None
-        best_answer = None
-        if should_report_details:
-            best_logprob = scorer.score_target([generation_best_prompt], target)[0]
-            if objective in {"first-token-logprob", "first-token-top-margin"}:
-                best_rank = scorer.target_first_token_ranks([generation_best_prompt], target)[0]
-            elif len(scorer.target_ids(target)) == 1:
-                best_rank = scorer.target_ranks([generation_best_prompt], target)[0]
-            if generate_during_search:
-                best_answer = scorer.generate_answer(generation_best_prompt)
-        history.append(
-            GAStep(
-                generation=generation,
-                system_prompt=generation_best_prompt,
-                score=generation_best_score,
-                logprob_score=best_logprob,
-                target_rank=best_rank,
-                answer=best_answer,
+                scores = [scores_by_genome[genome] for genome in population]
+            prompts = [genome_to_prompt(genome) for genome in population]
+            ranked = sorted(
+                zip(population, prompts, scores),
+                key=lambda item: item[2],
+                reverse=True,
             )
-        )
-        if generation % report_every == 0 or generation == generations:
-            details = ""
-            if best_logprob is not None:
-                details += f", logprob={best_logprob:.4f}"
-            if best_rank is not None:
-                details += f", rank={best_rank}"
-            if best_answer is not None:
-                details += f", answer={best_answer!r}"
-            cache_details = f", cache={len(score_cache)}" if cache_scores else ""
-            print(
-                f"ga generation {generation}/{generations}: "
-                f"pop={len(population)}, score={generation_best_score:.4f}"
-                f"{details}{cache_details}, "
-                f"prompt={generation_best_prompt}",
-                flush=True,
-            )
+            final_ranked = ranked
+            generation_best_genome, generation_best_prompt, generation_best_score = ranked[0]
+            if generation_best_score > best_score:
+                best_prompt = generation_best_prompt
+                best_score = generation_best_score
 
-        if generation == generations:
-            break
-
-        next_size = population_size
-        if final_population_size is not None:
-            next_progress = (generation + 1) / generations
-            next_size = round(
-                population_size
-                - (population_size - final_population_size) * next_progress
+            should_report_details = (
+                scorer is not None
+                and (generation % report_every == 0 or generation == generations)
             )
-            next_size = max(final_population_size, next_size)
-        effective_elite_count = min(elite_count, next_size - 1)
-        next_population = [item[0] for item in ranked[:effective_elite_count]]
-        seen = set(next_population)
-        while len(next_population) < next_size:
-            parent_a = tournament_select(population, scores, rng, tournament_size)
-            parent_b = tournament_select(population, scores, rng, tournament_size)
-            child = crossover(parent_a, parent_b, rng, crossover_mode)
-            child = mutate(child, rng, mutation_rate)
-            if child in seen:
-                child = mutate(child, rng, 1.0 / length)
-            next_population.append(child)
-            seen.add(child)
-        population = next_population
+            best_logprob = None
+            best_rank = None
+            best_answer = None
+            if should_report_details:
+                best_logprob = scorer.score_target([generation_best_prompt], target)[0]
+                if objective in {"first-token-logprob", "first-token-top-margin"}:
+                    best_rank = scorer.target_first_token_ranks([generation_best_prompt], target)[0]
+                elif len(scorer.target_ids(target)) == 1:
+                    best_rank = scorer.target_ranks([generation_best_prompt], target)[0]
+                if generate_during_search:
+                    best_answer = scorer.generate_answer(generation_best_prompt)
+            history.append(
+                GAStep(
+                    generation=generation,
+                    system_prompt=generation_best_prompt,
+                    score=generation_best_score,
+                    logprob_score=best_logprob,
+                    target_rank=best_rank,
+                    answer=best_answer,
+                )
+            )
+            elapsed = time.time() - started_at
+            if wandb_run is not None:
+                remaining_generations = max(0, generations - generation)
+                seconds_per_generation = elapsed / max(1, generation + 1)
+                wandb_run.log(
+                    {
+                        "generation": generation,
+                        "population_size": len(population),
+                        "best_score": generation_best_score,
+                        "best_score_so_far": best_score,
+                        "best_logprob": best_logprob if best_logprob is not None else float("nan"),
+                        "best_rank": best_rank if best_rank is not None else -1,
+                        "score_cache_size": len(score_cache),
+                        "missing_genomes": len(missing),
+                        "elapsed_seconds": elapsed,
+                        "seconds_per_generation": seconds_per_generation,
+                        "eta_seconds": remaining_generations * seconds_per_generation,
+                    },
+                    step=generation,
+                )
+
+            if generation % report_every == 0 or generation == generations:
+                details = ""
+                if best_logprob is not None:
+                    details += f", logprob={best_logprob:.4f}"
+                if best_rank is not None:
+                    details += f", rank={best_rank}"
+                if best_answer is not None:
+                    details += f", answer={best_answer!r}"
+                cache_details = f", cache={len(score_cache)}" if cache_scores else ""
+                print(
+                    f"ga generation {generation}/{generations}: "
+                    f"pop={len(population)}, score={generation_best_score:.4f}"
+                    f"{details}{cache_details}, "
+                    f"prompt={generation_best_prompt}",
+                    flush=True,
+                )
+
+            if generation == generations:
+                break
+
+            next_size = population_size
+            if final_population_size is not None:
+                next_progress = (generation + 1) / generations
+                next_size = round(
+                    population_size
+                    - (population_size - final_population_size) * next_progress
+                )
+                next_size = max(final_population_size, next_size)
+            effective_elite_count = min(elite_count, next_size - 1)
+            next_population = [item[0] for item in ranked[:effective_elite_count]]
+            seen = set(next_population)
+            while len(next_population) < next_size:
+                parent_a = tournament_select(population, scores, rng, tournament_size)
+                parent_b = tournament_select(population, scores, rng, tournament_size)
+                child = crossover(parent_a, parent_b, rng, crossover_mode)
+                child = mutate(child, rng, mutation_rate)
+                if child in seen:
+                    child = mutate(child, rng, 1.0 / length)
+                next_population.append(child)
+                seen.add(child)
+            population = next_population
+    finally:
+        if wandb_run is not None:
+            wandb_run.finish()
 
     write_ga_csv(csv_path, history)
     write_ga_plot(plot_path, history, objective, target)
@@ -3053,6 +3093,10 @@ def main() -> None:
     if args.use_sl_system_prompt and args.init_prompt is None:
         animal = args.target.lower()
         args.init_prompt = SL_SYSTEM_PROMPT_TEMPLATE.format(animal=animal)
+    wandb_config = {
+        key: str(value) if isinstance(value, Path) else value
+        for key, value in vars(args).items()
+    }
     competitors = args.competitors.split("|") if args.competitors else []
     use_distributed_ga = args.method == "ga" and args.ga_workers > 1
     use_transcript_workers = args.method == "transcript" and args.transcript_workers > 1
@@ -3152,6 +3196,9 @@ def main() -> None:
                     cache_scores=not args.no_score_cache,
                     final_population_size=args.final_population_size,
                     distributed_evaluator=evaluator,
+                    wandb_project=args.wandb_project,
+                    wandb_run_name=args.wandb_run_name,
+                    wandb_config=wandb_config,
                 )
         else:
             assert scorer is not None
@@ -3176,6 +3223,9 @@ def main() -> None:
                 generate_during_search=not args.no_generate_during_search,
                 cache_scores=not args.no_score_cache,
                 final_population_size=args.final_population_size,
+                wandb_project=args.wandb_project,
+                wandb_run_name=args.wandb_run_name,
+                wandb_config=wandb_config,
             )
         print_result("ga", ga)
 
