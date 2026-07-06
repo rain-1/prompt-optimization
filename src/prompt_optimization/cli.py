@@ -310,8 +310,10 @@ class LlamaScorer:
         target_ids: list[int],
         objective: str,
     ) -> torch.Tensor:
-        if objective == "logprob":
+        if objective in {"logprob", "first-token-logprob"}:
             log_probs = torch.log_softmax(logits, dim=-1)
+            if objective == "first-token-logprob":
+                return log_probs[:, target_start - 1, target_ids[0]]
             total = torch.zeros(logits.shape[0], device=logits.device, dtype=logits.dtype)
             for offset, token_id in enumerate(target_ids):
                 total = total + log_probs[:, target_start + offset - 1, token_id]
@@ -327,8 +329,8 @@ class LlamaScorer:
             perfect = torch.isneginf(above_logsumexp)
             scores = target_logits - above_logsumexp
             return torch.where(perfect, torch.full_like(scores, torch.inf), scores)
-        if objective == "top-margin":
-            if len(target_ids) != 1:
+        if objective in {"top-margin", "first-token-top-margin"}:
+            if objective == "top-margin" and len(target_ids) != 1:
                 raise ValueError("top-margin expects a one-token target.")
             target_id = target_ids[0]
             next_logits = logits[:, target_start - 1, :]
@@ -588,6 +590,44 @@ class LlamaScorer:
         return scores
 
     @torch.inference_mode()
+    def score_first_token_logprob(self, system_prompts: list[str], target: str = TARGET) -> list[float]:
+        target_id = self.target_ids(target)[0]
+        inputs = self.tokenizer(
+            [self.prompt_text(prompt) for prompt in system_prompts],
+            return_tensors="pt",
+            add_special_tokens=False,
+            padding=True,
+        ).to(self.device)
+        lengths = inputs.attention_mask.sum(dim=1)
+        logits = self.model(**inputs).logits
+        scores: list[float] = []
+        for row, length in enumerate(lengths):
+            next_logits = logits[row, int(length.item()) - 1]
+            log_probs = torch.log_softmax(next_logits, dim=-1)
+            scores.append(float(log_probs[target_id].detach().cpu()))
+        return scores
+
+    @torch.inference_mode()
+    def score_first_token_top_margin(self, system_prompts: list[str], target: str = TARGET) -> list[float]:
+        target_id = self.target_ids(target)[0]
+        inputs = self.tokenizer(
+            [self.prompt_text(prompt) for prompt in system_prompts],
+            return_tensors="pt",
+            add_special_tokens=False,
+            padding=True,
+        ).to(self.device)
+        lengths = inputs.attention_mask.sum(dim=1)
+        logits = self.model(**inputs).logits
+        scores: list[float] = []
+        for row, length in enumerate(lengths):
+            next_logits = logits[row, int(length.item()) - 1]
+            target_logit = next_logits[target_id]
+            competitor_logits = next_logits.clone()
+            competitor_logits[target_id] = -torch.inf
+            scores.append(float((target_logit - competitor_logits.max()).detach().cpu()))
+        return scores
+
+    @torch.inference_mode()
     def score_top_token_margin(self, system_prompts: list[str], target: str = TARGET) -> list[float]:
         target_ids = self.tokenizer(target, add_special_tokens=False).input_ids
         if len(target_ids) != 1:
@@ -668,6 +708,23 @@ class LlamaScorer:
             ranks.append(int((next_logits > next_logits[target_id]).sum().item() + 1))
         return ranks
 
+    @torch.inference_mode()
+    def target_first_token_ranks(self, system_prompts: list[str], target: str = TARGET) -> list[int]:
+        target_id = self.target_ids(target)[0]
+        inputs = self.tokenizer(
+            [self.prompt_text(prompt) for prompt in system_prompts],
+            return_tensors="pt",
+            add_special_tokens=False,
+            padding=True,
+        ).to(self.device)
+        lengths = inputs.attention_mask.sum(dim=1)
+        logits = self.model(**inputs).logits
+        ranks: list[int] = []
+        for row, length in enumerate(lengths):
+            next_logits = logits[row, int(length.item()) - 1]
+            ranks.append(int((next_logits > next_logits[target_id]).sum().item() + 1))
+        return ranks
+
     def score_objective(
         self,
         system_prompts: list[str],
@@ -676,10 +733,14 @@ class LlamaScorer:
     ) -> list[float]:
         if objective == "logprob":
             return self.score_target(system_prompts, target)
+        if objective == "first-token-logprob":
+            return self.score_first_token_logprob(system_prompts, target)
         if objective == "above-margin":
             return self.score_first_token_margin(system_prompts, target)
         if objective == "top-margin":
             return self.score_top_token_margin(system_prompts, target)
+        if objective == "first-token-top-margin":
+            return self.score_first_token_top_margin(system_prompts, target)
         if objective == "fixed-margin":
             return self.score_fixed_competitor_margin(system_prompts, target)
         raise ValueError(f"Unknown objective: {objective}")
@@ -759,7 +820,9 @@ def score_one(
     score = scorer.score_objective([system_prompt], objective, target)[0]
     logprob_score = scorer.score_target([system_prompt], target)[0]
     target_rank = None
-    if len(scorer.target_ids(target)) == 1:
+    if objective in {"first-token-logprob", "first-token-top-margin"}:
+        target_rank = scorer.target_first_token_ranks([system_prompt], target)[0]
+    elif len(scorer.target_ids(target)) == 1:
         target_rank = scorer.target_ranks([system_prompt], target)[0]
     answer = scorer.generate_answer(system_prompt, max_new_tokens=max_new_tokens)
     return ScoredPrompt(
@@ -906,8 +969,10 @@ def write_greedy_curve_plot(
     baseline_scores = [baseline.score for _ in lengths]
     objective_label = {
         "logprob": f'Log P("{target}")',
+        "first-token-logprob": f'Log P(first token of "{target}")',
         "above-margin": f'{target} logit - logsumexp(tokens above "{target}")',
         "top-margin": f'{target} logit - top non-{target} logit',
+        "first-token-top-margin": f'first token of {target} - top non-target token',
         "fixed-margin": f'{target} logit - fixed competitor logsumexp',
     }[objective]
 
@@ -1195,8 +1260,10 @@ def write_ga_plot(path: Path, history: list[GAStep], objective: str, target: str
     scores = [step.score for step in history]
     objective_label = {
         "logprob": f'Log P("{target}")',
+        "first-token-logprob": f'Log P(first token of "{target}")',
         "above-margin": f'{target} logit - logsumexp(tokens above "{target}")',
         "top-margin": f'{target} logit - top non-{target} logit',
+        "first-token-top-margin": f'first token of {target} - top non-target token',
         "fixed-margin": f'{target} logit - fixed competitor logsumexp',
     }[objective]
 
@@ -1248,8 +1315,10 @@ def write_igcg_plot(path: Path, history: list[IGCGStep], objective: str, target:
     scores = [step.score for step in history]
     objective_label = {
         "logprob": f'Log P("{target}")',
+        "first-token-logprob": f'Log P(first token of "{target}")',
         "above-margin": f'{target} logit - logsumexp(tokens above "{target}")',
         "top-margin": f'{target} logit - top non-{target} logit',
+        "first-token-top-margin": f'first token of {target} - top non-target token',
         "fixed-margin": f'{target} logit - fixed competitor logsumexp',
     }[objective]
 
@@ -1305,8 +1374,10 @@ def write_adc_plot(path: Path, history: list[ADCStep], objective: str, target: s
     scores = [step.score for step in history]
     objective_label = {
         "logprob": f'Log P("{target}")',
+        "first-token-logprob": f'Log P(first token of "{target}")',
         "above-margin": f'{target} logit - logsumexp(tokens above "{target}")',
         "top-margin": f'{target} logit - top non-{target} logit',
+        "first-token-top-margin": f'first token of {target} - top non-target token',
         "fixed-margin": f'{target} logit - fixed competitor logsumexp',
     }[objective]
 
@@ -1791,7 +1862,10 @@ def run_ga(
         best_answer = None
         if should_report_details:
             best_logprob = scorer.score_target([generation_best_prompt], target)[0]
-            best_rank = scorer.target_ranks([generation_best_prompt], target)[0]
+            if objective in {"first-token-logprob", "first-token-top-margin"}:
+                best_rank = scorer.target_first_token_ranks([generation_best_prompt], target)[0]
+            elif len(scorer.target_ids(target)) == 1:
+                best_rank = scorer.target_ranks([generation_best_prompt], target)[0]
             if generate_during_search:
                 best_answer = scorer.generate_answer(generation_best_prompt)
         history.append(
@@ -2759,17 +2833,22 @@ def parse_args() -> argparse.Namespace:
         "--objective",
         choices=[
             "logprob",
+            "first-token-logprob",
             "above-margin",
             "top-margin",
+            "first-token-top-margin",
             "fixed-margin",
             "animal-contrast",
             "animal-token-contrast",
         ],
         default="logprob",
         help=(
-            "logprob maximizes log P(target). above-margin maximizes the target "
+            "logprob maximizes log P(target). first-token-logprob maximizes only "
+            "the first target token. above-margin maximizes the target "
             "first-token logit minus logsumexp of all logits currently above it. "
             "top-margin maximizes target first-token logit minus the best non-target logit. "
+            "first-token-top-margin does the same using the first target token even "
+            "when the target has multiple tokens. "
             "fixed-margin maximizes target first-token logit minus fixed competitors. "
             "animal-contrast, for transcript GA, maximizes target logprob minus the "
             "strongest penalized animal logprob. animal-token-contrast does the same "
